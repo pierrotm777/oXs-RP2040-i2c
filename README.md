@@ -1,6 +1,7 @@
 # openXsensor (oXs) on RP2040 board with I2C protocols
 
 ## This project add 3 I2C protocols to the original project:
+- Original [oXs_on_RP2040](https://github.com/mstrens/oXs_on_RP2040/tree/test) project
 - RadioLink
 - Spektrum Xbus
 - Hitec 
