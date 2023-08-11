@@ -33,4 +33,4 @@ Depending on the protocol, the pins used for PRIMARY/SECONDARY RC Channels and f
 ![Optima 7](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/Hitec_Optima7_Telemetry.jpg)  
 
 ### Spektrum XBUS wiring
-![Connection](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/Spektrum_XBUS.jpg)  
+![Connection](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/Spektrum_XBUS_Telemetry.jpg)  
