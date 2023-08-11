@@ -14,14 +14,17 @@ Connect a 5V source to the Vcc pin of RP2040 board ( RP2040-zero or RP2040-TINY 
 There is no default affectation of the RP2040 pins so user has to specify it with some parameters after flashing the firmware (see below).  
 But this board use the <font color=red>**GPIO8 for TLM (SDA)**</font> and <font color=red>**GPIO9 for PRI(SCL)**.</font>  
 
+<font color=red>**Please note that SCL0 is different from SCL as well SDA0 is different from SDA**.</font>  
+<font color=red>**SDA and SCL, in reality SDA1 and SCL1, are used by the I2C sensors**.</font>  
+
 ![I2C Wiring](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/oXsRP2040Full_I2C.jpg)
 
 Depending on the protocol, the pins used for PRIMARY/SECONDARY RC Channels and for Telemetry (TLM) varies
 | protocol       | PRI pin is connectected to | SEC pin is connected to | TLM pin is connected to| Comment|
 |----------      |----------------------------|-------------------------|------------------------|--------|
-| R(RadioLink)   |    (SCL from Rx1)          |     Not used            | (SDA from RX1)         | (1)(2) |
-| X(Xbus)        |    (SCL from Rx1)          |     Not used            | (SDA from RX1)         | (1)(2) |
-| T(Hitec)       |    (SCL from Rx1)          |     Not used            | (SDA from RX1)         | (1)(2) |
+| R(RadioLink)   |    (SCL0 from Rx1)         |     Not used            | (SDA0 from RX1)        | (1)(2) |
+| X(Xbus)        |    (SCL0 from Rx1)         |     Not used            | (SDA0 from RX1)        | (1)(2) |
+| T(Hitec)       |    (SCL0 from Rx1)         |     Not used            | (SDA0 from RX1)        | (1)(2) |
 
 (1) for safety, insert a 1 kOhm resistor between TLM pin and Rx 
 
