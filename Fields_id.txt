@@ -1,0 +1,32 @@
+In next line, you can see the list of sensors that should be discovered
+List of ibus fields : 0 11 12 15 16 17 23 1 0 5 2 3 4
+Forget the first 0 in the list (it has no meaning)
+Then here the meaning of the codes (some are not transmitted on Ibus):
+0 = LATITUDE =0, // GPS special format
+1 = LONGITUDE, // GPS special format
+2= GROUNDSPEED , // GPS cm/s
+3= HEADING, // GPS 0.01 degree
+4= ALTITUDE , // GPS cm
+
+5= NUMSAT , // 5 GPS no unit
+6= GPS_DATE , // GPS special format AAMMJJFF
+7= GPS_TIME , // GPS special format HHMMSS00
+8= GPS_PDOP , // GPS no unit
+9= GPS_HOME_BEARING, // GPS degree
+
+10= GPS_HOME_DISTANCE, // 10 GPS in m
+11= MVOLT, // volt1 in mVolt
+12= CURRENT, // volt2 must be in seq for voltage.cpp in mA (mV)
+13= RESERVE1, // volt3 must be in seq for voltage.cpp in mV
+14= RESERVE2, // volt4 must be in seq for voltage.cpp in mV
+
+15= CAPACITY, // based on current (volt2) in mAh
+16= TEMP1, // = Volt3 but saved as temp in degree
+17= TEMP2, // = Volt4 but saved as temp in degree
+17= VSPEED, // baro in cm/s
+19= RELATIVEALT , // baro in cm
+
+20= PITCH, // 20 imu in degree
+21= ROLL, // imu in degree
+22= YAW , // not used to save data in degree
+23= RPM , // RPM sensor in Herzt

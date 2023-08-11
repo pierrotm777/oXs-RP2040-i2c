@@ -1,0 +1,15 @@
+1 About current measurement : as the voltage of ACS758 is not 0V for a 0 current, you have to define an offset1.
+oXs performs the calculation in this way : calculated current (in mA) = (measured voltage (mV) * scale1) - offset1
+You have to calculate scale1 and offset 1 taking care that:
+- You measured a voltage of 1640 mV for a current of 0 A
+- the datasheet for your sensor says that the sensitivity is 13.3 mv/A
+
+So, you can define 2 equations like this
+1) for 0 A = (1640 mV * scale1) - offset1
+2) for 100 A = ((1640mV + 100A*13.3mV/A) * scale1) - offset1 = (2970 mV*scale1) - offset1
+
+if you make (2)-(1) you get 100A - 0 = (2970 mV*scale1) - offset1 - ((1640 mV * scale1) - offset1 )
+Which is equal to 100 = (2970-1640)* scale1 ==> 100000mA = 1330 * scale1 ===> scale1 = 100000/1330 = 75.188
+
+So reusing (1) you now have:
+0 A = (1640 mV * 75.188) - offset1 ===> offset1 = 1640*75.188= 123300.
