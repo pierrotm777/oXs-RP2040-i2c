@@ -26,11 +26,11 @@ Depending on the protocol, the pins used for PRIMARY/SECONDARY RC Channels and f
 (2) for safety, insert a 1 kOhm resistor between PRI pin and Rx
 
 ### RadioLink wiring
-![RadioLink](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/RadioLink_R9DS.jpg)
-![RadioLink](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/RadioLink_Telemetry.jpg)  
+![R9DS](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/RadioLink_R9DS.jpg)
+![Connection](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/RadioLink_Telemetry.jpg)  
 
 ### Optima 7 wiring
 ![Optima 7](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/Hitec_Optima7_Telemetry.jpg)  
 
-
-
+### Spektrum XBUS wiring
+![Connection](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/Spektrum_XBUS.jpg)  
