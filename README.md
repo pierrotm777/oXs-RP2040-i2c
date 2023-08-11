@@ -12,7 +12,7 @@ RadioLink/Spektrum/Hitec/... receiver, MS5611, GPS and other sensors must share 
 Connect a 5V source to the Vcc pin of RP2040 board ( RP2040-zero or RP2040-TINY boards do not accept more than 5.5V on Vcc pin !! ).  
 There is no default affectation of the RP2040 pins so user has to specify it with some parameters after flashing the firmware (see below).  
 
-![I2C Wiring](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/oXsRP2040Full_I2C.jpg)  
+![I2C Wiring](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/oXsRP2040Full_I2C.jpg)
 
 Depending on the protocol, the pins used for PRIMARY/SECONDARY RC Channels and for Telemetry (TLM) varies
 | protocol       | PRI pin is connectected to | SEC pin is connected to | TLM pin is connected to| Comment|
@@ -24,4 +24,13 @@ Depending on the protocol, the pins used for PRIMARY/SECONDARY RC Channels and f
 (1) for safety, insert a 1 kOhm resistor between TLM pin and Rx 
 
 (2) for safety, insert a 1 kOhm resistor between PRI pin and Rx
+
+### RadioLink wiring
+![RadioLink](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/RadioLink_R9DS.jpg)
+![RadioLink](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/RadioLink_Telemetry.jpg)  
+
+### Optima 7 wiring
+![Optima 7](https://github.com/pierrotm777/oXs-RP2040-i2c/blob/main/Hitec_Optima7_Telemetry.jpg)  
+
+
 
