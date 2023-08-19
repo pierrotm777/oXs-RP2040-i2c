@@ -12,7 +12,7 @@ RadioLink/Spektrum/Hitec/... receiver, MS5611, GPS and other sensors must share 
 Connect a 5V source to the Vcc pin of RP2040 board ( RP2040-zero or RP2040-TINY boards do not accept more than 5.5V on Vcc pin !! ).  
 
 There is no default affectation of the RP2040 pins so user has to specify it with some parameters after flashing the firmware (see below).  
-But this board use the <font color=red>**GPIO8 for TLM (SDA)**</font> and <font color=red>**GPIO9 for PRI(SCL)**.</font>  
+But this board use the <font color=red>**GPIO8 for TLM (SDA0)**</font> and <font color=red>**GPIO9 for PRI(SCL0)**.</font>  
 
 <font color=red>**Please note that SCL0 is different from SCL as well SDA0 is different from SDA**.</font>  
 <font color=red>**SDA and SCL, in reality SDA1 and SCL1, are used by the I2C sensors**.</font>  
