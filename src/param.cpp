@@ -144,24 +144,24 @@ void processCmd(){
         printf("- To activate a function, select the GPIO and enter function code = GPIO (e.g. PRI=5)\n");
         printf("    Function                  Code        Valid GPIO's\n");
 
-        if (config.protocol != 'R')
+        if ((config.protocol == 'R') || (config.protocol == 'X') || (config.protocol == 'T'))
         {
-            printf("    Primary channels input    PRI     = 5, 9, 21, 25\n");
+            printf("    Primary channels input    PRI     = 0, 4, 8, 12 (for SDA0)\n");
         }
         else
         {
-            printf("    Primary channels input    PRI     = 0, 4, 8, 12 (for SDA0)\n");
+          printf("    Primary channels input    PRI     = 5, 9, 21, 25\n");  
         }
 
         printf("    Secondary channels input  SEC     = 1, 13, 17, 29\n");
 
-        if (config.protocol != 'R')
+        if ((config.protocol == 'R') || (config.protocol == 'X') || (config.protocol == 'T'))
         {
-            printf("    Telemetry                 TLM     = 0, 1, 2, ..., 29\n");
+            printf("    Telemetry                 TLM     = 1, 5, 9, 13 (for SCL0)\n");
         }
         else
         {
-            printf("    Telemetry                 TLM     = 1, 5, 9, 13 (for SCL0)\n");
+            printf("    Telemetry                 TLM     = 0, 1, 2, ..., 29\n");
         }
 
         printf("    GPS Rx                    GPS_RX  = 0, 1, 2, ..., 29\n");
@@ -1052,22 +1052,22 @@ void printConfigAndSequencers(){
     uint8_t version[] =   VERSION ;
     printf("\nVersion = %s \n", version)  ;
     printf("    Function                GPIO  Change entering XXX=yyy (yyy=255 to disable)\n");
-    if (config.protocol != 'R' ||config.protocol != 'X' || config.protocol != 'T')
+    if ((config.protocol == 'R') || (config.protocol == 'X') || (config.protocol == 'T'))
     {
-        printf("Primary channels input    = %4u  (PRI     = 5, 9, 21, 25)\n", config.pinPrimIn);
+        printf("Primary channels input    = %4u  (PRI     = 1, 5, 9, 13 (for SCL0) )\n", config.pinPrimIn); 
     }
     else
     {
-        printf("Primary channels input    = %4u  (PRI     = 1, 5, 9, 13 (for SCL0) )\n", config.pinPrimIn);       
+        printf("Primary channels input    = %4u  (PRI     = 5, 9, 21, 25)\n", config.pinPrimIn);      
     }
     printf("Secondary channels input  = %4u  (SEC     = 1, 13, 17, 29)\n", config.pinSecIn);
-    if (config.protocol != 'R' ||config.protocol != 'X' || config.protocol != 'T')
+    if ((config.protocol == 'R') || (config.protocol == 'X') || (config.protocol == 'T'))
     {
-        printf("Telemetry . . . . . . . . = %4u  (TLM     = 0, 1, 2, ..., 29)\n", config.pinTlm);
+        printf("Telemetry . . . . . . . . = %4u  (TLM     = 0, 4, 8, 12 (for SDA0) )\n", config.pinTlm);
     }
     else
     {
-        printf("Telemetry . . . . . . . . = %4u  (TLM     = 0, 4, 8, 12 (for SDA0) )\n", config.pinTlm);       
+        printf("Telemetry . . . . . . . . = %4u  (TLM     = 0, 1, 2, ..., 29)\n", config.pinTlm);       
     }
     printf("GPS Rx  . . . . . . . . . = %4u  (GPS_RX  = 0, 1, 2, ..., 29)\n", config.pinGpsRx );
     printf("GPS Tx  . . . . . . . . . = %4u  (GPS_TX  = 0, 1, 2, ..., 29)\n", config.pinGpsTx );

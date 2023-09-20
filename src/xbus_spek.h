@@ -8,7 +8,13 @@
 #include "i2c_slave.h"
 #include "xbus_spek_sensors.h"
 
-#define IDENTIFIER   TELE_DEVICE_GPS_LOC
+uint8_t IDENTIFIER = 0;
+uint8_t addressMask = 0;
+
+#define XBUS_GPS_INFO_FLAGS_IS_NORTH_BIT 0
+#define XBUS_GPS_INFO_FLAGS_IS_EAST_BIT 1
+#define XBUS_GPS_INFO_FLAGS_LONG_GREATER_99_BIT 2
+#define XBUS_GPS_INFO_FLAGS_NEGATIVE_ALT_BIT 7
 
 #define NO_DATA 0xff
 #define INT_NO_DATA 0xffff
@@ -30,3 +36,6 @@ void i2c_spek_handler(i2c_inst_t *i2c, i2c_slave_event_t event);
 //main Xbus Spektrum loop
 void handleXbusSpektrum();
 
+uint8_t bcd8(float value, uint8_t precision);
+uint16_t bcd16(float value, uint8_t precision);
+uint32_t bcd32(float value, uint8_t precision);
