@@ -10,7 +10,7 @@
 #include <inttypes.h>
 #include "stdio.h"
 #include "ws2812.h"
-#include "pwm.pio.h"
+//#include "pwm.pio.h"
 #include "mpu.h"
 #include "sequencer.h"
 
@@ -32,6 +32,9 @@ uint16_t sbusFrame16Bits[25];
 extern uint32_t lastRcChannels;
 extern uint32_t lastPriChannelsMillis; // used in crsf.cpp and in sbus_in.cpp to say that we got Rc channels data
 extern uint32_t lastSecChannelsMillis; // used in crsf.cpp and in sbus_in.cpp to say that we got Rc channels data
+extern bool newRcChannelsReceivedForPWM ;  // used to update the PWM data
+extern bool newRcChannelsReceivedForLogger;  // used to update the PWM data
+
 
 extern bool sbusPriMissingFlag;
 extern bool sbusSecMissingFlag;
@@ -51,6 +54,24 @@ extern uint8_t debugSbusOut;
 extern MPU mpu;
 extern int32_t cameraPitch;
 extern int32_t cameraRoll; 
+
+//added aeropic
+extern int32_t gyroX; // angular rate deg/sec
+extern int32_t gyroY; 
+uint16_t rollTrim;
+uint16_t roll2Trim;
+uint16_t pitchTrim;
+int32_t initialPitch;
+int32_t initialRoll;
+# define GYRO_MODE_HOLD 1
+# define GYRO_MODE_OFF 0
+# define GYRO_MODE_RATE 2
+int16_t gyroRollMode = GYRO_MODE_OFF;
+int16_t gyroPitchMode = GYRO_MODE_OFF;
+float gyroRollRatio; // gain for gyro compensation
+float gyroPitchRatio; // gain for gyro compensation
+int16_t gyroUpSideDown = 0;
+//added aeropic
 
 extern field fields[];
 
@@ -174,18 +195,26 @@ void fillSbusFrame(){
 }
 
     
-#define TOP (20000 - 1)
+
+//#define TOP (20000 - 1)
 #define DIVIDER 133
+uint16_t pwmTop = 20000;  // max value for 50 hz (when divider = 133 => 1Mz)
+
 
 bool pwmIsUsed;
 float sbusCenter = (FROM_SBUS_MIN + FROM_SBUS_MAX) /2; 
 float ratioSbusRange = 400.0 / (float) (FROM_SBUS_MAX - FROM_SBUS_MIN) ; // full range of Sbus should provide a difference of 400 (from -200 up to 200)
+
+bool newRcChannelsReceivedForLogger = false;  // used to generate a log of rc channels
+
 
 extern SEQUENCER seq ;
 //extern bool isSequencerValid ;  
 
 void setupPwm(){
     pwmIsUsed = false;
+    pwmTop = (1000000 / config.pwmHz) ; // maximum value of the PWM counter ; define the interval between 2 pulses// used also in sequencer
+
     for (uint8_t i=0 ; i<16 ; i++){
         if ( config.pinChannels[i] != 255) pwmIsUsed = true;
     }
@@ -199,8 +228,8 @@ void setupPwm(){
         // counter is allowed to wrap over its maximum range (0 to 2**16-1)
         pwm_config configPwm = pwm_get_default_config();
         // Set divider, reduces counter clock to sysclock/this value
-        pwm_config_set_wrap (&configPwm , TOP) ; // set top value for wrapping
-        pwm_config_set_clkdiv_int (&configPwm , DIVIDER);
+        pwm_config_set_wrap (&configPwm , pwmTop-1) ; // set top value for wrapping
+        pwm_config_set_clkdiv_int (&configPwm , DIVIDER);     // with 133, it means 1usec
         // Load the configuration into our PWM slice, and set it running.
         pwm_init(slice_num, &configPwm, true);
         pwm_set_gpio_level ( (uint) config.pinChannels[i] , 0) ; // start PWM with 0% duty cycle
@@ -213,7 +242,7 @@ void setupPwm(){
         // counter is allowed to wrap over its maximum range (0 to 2**16-1)
         pwm_config configPwm = pwm_get_default_config();
         // Set divider, reduces counter clock to sysclock/this value
-        pwm_config_set_wrap (&configPwm , TOP) ; // set top value for wrapping
+        pwm_config_set_wrap (&configPwm , pwmTop-1) ; // set top value for wrapping  // TOP value defines the interval between 2 pulses.
         pwm_config_set_clkdiv_int (&configPwm , DIVIDER);
         // Load the configuration into our PWM slice, and set it running.
         pwm_init(slice_num, &configPwm, true);
@@ -221,24 +250,36 @@ void setupPwm(){
             pwm_set_gpio_level ( (uint) seq.defs[i].pin , 0) ; // start PWM with 0% duty cycle when a servo is used
         }
         else {
-            pwm_set_gpio_level ( (uint) seq.defs[i].pin , seq.defs[i].defValue) ; // start PWM with default value when analog is used
+            //   convert 0...100 value to 0...pwmTop
+            int pwmValue = (int)seq.defs[i].defValue * (int) pwmTop / 100 ;
+            if (pwmValue < 0) pwmValue = 0;
+            if (pwmValue > pwmTop) pwmValue = (int) pwmTop;
+            pwm_set_gpio_level ( (uint) seq.defs[i].pin , (uint16_t) pwmValue) ; // start PWM with default value when analog is used
         }    
     } // end of sequencer
 }
 
 
 void updatePWM(){
-    static uint32_t lastPwmMillis = 0 ;
+    //static uint32_t lastPwmMillis = 0 ;
     uint16_t pwmValue;
     float ratio;
     int16_t _pwmValue;
     int16_t pwmMax;
     int16_t pwmMin;
 
-    if (( pwmIsUsed == false) && ( seq.defsMax == 0 )) return ; // skip when PWM and sequencer is not used
+     //added aeropic
+    int16_t stickValue;
+    int32_t _cameraRoll;
+    int32_t _cameraPitch;
+
+    if (( pwmIsUsed == false) && ( seq.defsMax == 0 ) && (config.pinLogger == 255)) return ; // skip when PWM, sequencer and logger are not used
     if ( ! lastRcChannels) return ;   // skip if we do not have last channels
-    if ( (millisRp() - lastPwmMillis) > 5 ){ // we update once every 5 msec ???? perhaps better to update at each new crsf frame in order to reduce the latency
-        lastPwmMillis = millisRp();
+    if ( newRcChannelsReceivedForPWM){  // when new Rc channel is received (flag set by CRSF_IN, SBUS, FBUS, EXBUS, SRXL2, IBUS...)
+        newRcChannelsReceivedForPWM = false;  // reset the flag
+
+    //if ( (millisRp() - lastPwmMillis) > 5 ){ // we update once every 5 msec ???? perhaps better to update at each new crsf frame in order to reduce the latency
+    //    lastPwmMillis = millisRp();
         if ( ( millisRp()- lastRcChannels) > FAILSAFE_DELAY ) { // if we do not get a RC channels frame, apply failsafe value if defined
             if (config.failsafeType == 'C') memcpy( &sbusFrame.rcChannelsData , &config.failsafeChannels, sizeof(config.failsafeChannels));
         }
@@ -258,6 +299,7 @@ void updatePWM(){
         rcSbusOutChannels[13] = (uint16_t) sbusFrame.rcChannelsData.ch13 ;
         rcSbusOutChannels[14] = (uint16_t) sbusFrame.rcChannelsData.ch14 ;
         rcSbusOutChannels[15] = (uint16_t) sbusFrame.rcChannelsData.ch15 ;
+        newRcChannelsReceivedForLogger = true;  // used to update the logger data
         if ( pwmIsUsed == true) {
             for( uint8_t i = 0 ; i < 16 ; i++){    
                 if ( config.pinChannels[i] == 255) continue ; // skip i when pin is not defined for this channel 
@@ -302,6 +344,222 @@ void updatePWM(){
                         pwmValue = _pwmValue;
                     } 
                 #endif
+             // added aeropic
+                #ifdef GYRO_ROLL_CHANNEL
+// TODO DELTA
+                // the GYRO_ROLL_CONTROL_CHANNEL PWM value, extracted from SBUS is used to control the behaviour of the gyro (set the mode, set the gain)
+                // then the ROLL_CHANNEL  is fed with the appropriate PWM value and is used to control the servo
+                // if no CONTROL_CHANNEL is defined on the axis, the gyro mode is et to RATE and the gains are those defined in CONFIG.h
+
+                
+
+                    if ( (i==(GYRO_ROLL_CHANNEL-1)) && (mpu.mpuInstalled) && fields[ROLL].onceAvailable) { 
+                       
+                        //       Setting the channel on 0% disables the compensation. This can be done using a 3 positions switch on the TX
+                        //       setting the channel at 1100µsec +/-100µsec activates the angular rate gyro stabilization and sets the gain
+                        //       setting the channel at 1900µsec +/-100µsec activates the attitude hold gyro stabilization and sets the gain
+
+                        #ifndef GYRO_ROLL_CONTROL_CHANNEL // if axis is NOT controlled by a switch, read gain values from config
+                            gyroRollRatio = (GYRO_ROLL_RATIO - 80)*5 + 1500; // set the default gain value expressed in PWM values - this is the gain for RATE mode
+                            rollTrim = 1500; //set the estimated rolltrim to neutral
+                            roll2Trim = 1500; //set the estimated rolltrim to neutral
+                        #endif
+                        
+                        #ifdef GYRO_ROLL_CONTROL_CHANNEL // if axis is controlled by a switch, read gain values
+                            // gain is coded inside the pwm value of CONTROL_CHANNEL (+/-100µsec around 1100 or 1900 µsec)
+                            gyroRollRatio = (float) fmap( rcSbusOutChannels[GYRO_ROLL_CONTROL_CHANNEL - 1]  ); // get the gyro gain from roll control channel in PWM 
+                            //  printf("%i\n",  (int) gyroRollRatio);
+                            
+                        #endif
+
+                        // mode is controlled by the sign of gyro roll ratio received in the GYRO_ROLL_CONTROL_CHANNEL from the TX
+                        if (gyroRollRatio > 1700) {   // setting the channel (SBdown) at 1900µsec +/-100µsec activates the attitude hold gyro stabilization
+                                gyroRollRatio = gyroRollRatio - 1900; // ratio in +/-100
+                                gyroRollMode = GYRO_MODE_HOLD;
+                        }
+                        else if (gyroRollRatio < 1300) { //setting the channel (SBup) at 1100µsec +/-100µsec activates the angular rate gyro stabilization 
+                                gyroRollRatio = gyroRollRatio - 1100; // ratio in +/-100
+                                gyroRollMode = GYRO_MODE_RATE;
+                        }
+                        else { // gyro control OFF. Store attitude and initial values of sticks
+                            #ifdef GYRO_ROLL_CONTROL_CHANNEL // if axis is controlled by a switch
+                                gyroRollRatio = 0;
+                                gyroRollMode = GYRO_MODE_OFF;
+                                // latch initial values for next gyro hold or rate activation
+                            // initialPitch = cameraPitch; //LSB = 1/10 deg
+                                initialRoll = cameraRoll;  // <<<<<<<<< [-1800, 1800] discontinuity at 180°
+                                if ((1800 - abs(initialRoll)) < 600) { // gyro is upside down or the plane, to avoid discontinuity, offset gyro roll
+                                    gyroUpSideDown = 1;
+                                    if (initialRoll < 0) initialRoll = initialRoll + 3600;
+                                }
+                                else gyroUpSideDown = 0;
+
+                            //  pitchTrim = fmap( rcSbusOutChannels[GYRO_PITCH_CHANNEL - 1]  );
+                                #ifdef GYRO_ROLL_CONTROL_CHANNEL
+                                    rollTrim = fmap( rcSbusOutChannels[GYRO_ROLL_CHANNEL - 1]  );
+                                    #ifdef GYRO_ROLL2_CHANNEL
+                                        roll2Trim = fmap( rcSbusOutChannels[GYRO_ROLL2_CHANNEL - 1]  );
+                                    #endif
+                                #endif
+
+                            #endif
+                        }
+                        
+                        _pwmValue = ((int16_t) fmap( rcSbusOutChannels[GYRO_ROLL_CHANNEL - 1]  )) ; // apply the AIL stick value
+                        //then apply gyro compensation according to mode
+                        if (gyroRollMode == GYRO_MODE_RATE) {
+                            //apply compensation only when stick is close to neutral
+                            stickValue = abs(_pwmValue-rollTrim);
+                            if (stickValue > (GYRO_STICK_ATTENUATION*5)) stickValue = GYRO_STICK_ATTENUATION*5;
+                            gyroRollRatio = gyroRollRatio * (1.0 -  ((float) stickValue / (float) (GYRO_STICK_ATTENUATION*5)));
+
+                            _pwmValue = _pwmValue - (int16_t) (gyroX * gyroRollRatio * 0.05) ; 
+                        }
+
+                        if (gyroRollMode == GYRO_MODE_HOLD) {  // <<<<<<<< BUG à 180°
+                            //apply compensation only when stick is close to neutral
+                            stickValue = abs(_pwmValue-rollTrim);
+                            if (stickValue > (GYRO_STICK_ATTENUATION*5)) stickValue = GYRO_STICK_ATTENUATION*5;
+                            gyroRollRatio = gyroRollRatio * (1.0 -  ((float) stickValue / (float) (GYRO_STICK_ATTENUATION*5)));
+                            _cameraRoll = cameraRoll;
+                            if ((gyroUpSideDown == 1) && (cameraRoll <0)) _cameraRoll = cameraRoll + 3600;
+                            _pwmValue = _pwmValue - (int16_t) ((float)((_cameraRoll-initialRoll)) * gyroRollRatio * 0.01) ; 
+                        }
+
+                        // normalize the values
+                        pwmMax = fmapMinMax(GYRO_ROLL_MAX);
+                        pwmMin = fmapMinMax(GYRO_ROLL_MIN);
+                        if (_pwmValue > pwmMax ) _pwmValue = pwmMax;
+                        if (_pwmValue < pwmMin ) _pwmValue = pwmMin;
+                     //   printf("%i %i %i  %i %i\n", (int) _cameraRoll , (int) pwmValue , (int) _pwmValue, (int) gyroRollRatio, (int) rollTrim);
+                        pwmValue = _pwmValue;  // send the pwmvalue to the GYRO_ROLL_CHANNEL
+                    } 
+                #endif //GYRO_ROLL_CONTROL_CHANNEL
+
+
+                #ifdef GYRO_ROLL2_CHANNEL
+// TODO DELTA
+                // the GYRO_ROLL2_CONTROL_CHANNEL PWM value, extracted from SBUS is used to control the behaviour of the gyro (set the mode, set the gain)
+                // then the same channel is fed with the appropriate PWM value and is used to control the servo
+
+                    if ( (i==(GYRO_ROLL2_CHANNEL-1)) && (mpu.mpuInstalled) && fields[ROLL].onceAvailable) { 
+                       
+                        //       gyroRollRatio (gain) and gyroRollMode are defined by the GYRO_ROLL_CHANNEL
+                        //       initialRoll and rollTrims are also latched in GYRO_ROLL_CHANNEL management
+
+                        
+                        
+                        
+
+                        _pwmValue = ((int16_t) fmap( rcSbusOutChannels[GYRO_ROLL2_CHANNEL - 1]  )) ; // apply the AIL2 stick value
+                        //then apply gyro compensation according to mode
+                        if (gyroRollMode == GYRO_MODE_RATE) {
+                            //apply compensation only when stick is close to neutral (gain attenuation is computed in GYRO_ROLL_CONTROL_CHANNEL)
+                           
+                            _pwmValue = _pwmValue - (int16_t) (gyroX * gyroRollRatio * 0.05 * GYRO_ROLL2_SIGN  ) ; 
+                        }
+
+                        if (gyroRollMode == GYRO_MODE_HOLD) {
+                            //apply compensation only when stick is close to neutral
+                           
+                            _pwmValue = _pwmValue - (int16_t) ((_cameraRoll-initialRoll) * gyroRollRatio * 0.01* GYRO_ROLL2_SIGN ) ; 
+                        }
+
+                        // normalize the values
+                        pwmMax = fmapMinMax(GYRO_ROLL_MAX);
+                        pwmMin = fmapMinMax(GYRO_ROLL_MIN);
+                        if (_pwmValue > pwmMax ) _pwmValue = pwmMax;
+                        if (_pwmValue < pwmMin ) _pwmValue = pwmMin;
+                        //printf("%i %i %i  %i %i\n", (int) cameraRoll , (int) pwmValue , (int) _pwmValue, (int) gyroRollRatio, (int) rollTrim);
+                        pwmValue = _pwmValue;  // send the pwmvalue to the GYRO_ROLL2_CHANNEL
+                    } 
+                #endif //GYRO_ROLL2_CONTROL_CHANNEL
+
+                #ifdef GYRO_PITCH_CONTROL_CHANNEL
+
+                // the GYRO_PITCH_CONTROL_CHANNEL PWM value, extracted from SBUS is used to control the behaviour of the gyro (set the mode, set the gain)
+                // then the GYRO_PITCH_CHANNEL  is fed with the appropriate PWM value and is used to control the servo
+                // if no CONTROL_CHANNEL is defined on the axis, the gyro mode is set to RATE and the gains are those defined in CONFIG.h
+
+
+// TODO VTAIL
+// TODO DELTA
+
+                    if ( (i==(GYRO_PITCH_CONTROL_CHANNEL-1)) && (mpu.mpuInstalled) && fields[PITCH].onceAvailable) { 
+                       
+                        //       Setting the channel on 0% disables the compensation. This can be done using a 3 positions switch on the TX
+                        //       setting the channel at 1100µsec +/-100µsec activates the angular rate gyro stabilization and sets the gain
+                        //       setting the channel at 1900µsec +/-100µsec activates the attitude hold gyro stabilization and sets the gain
+
+                        #ifndef GYRO_PITCH_CONTROL_CHANNEL // if axis is not controlled by a switch, read gain values from config
+                            gyroPitchRatio = (GYRO_PITCH_RATIO - 80)*5 + 1500; // set the default gain value expressed in PWM values - this is the gain for RATE mode
+                            pitchTrim = 1500; //set the estimated pitchtrim to neutral
+                        #endif
+                        #ifdef GYRO_PITCH_CONTROL_CHANNEL // if axis is controlled by a switch, read gain values
+                            // gain is coded inside the pwm value of CONTROL_CHANNEL (+/-100µsec around 1100 or 1900 µsec)
+                            gyroPitchRatio = (float) fmap( rcSbusOutChannels[GYRO_PITCH_CONTROL_CHANNEL - 1]  ); // get the gyro gain from pitch control channel in PWM 
+                            //  printf("%i\n",  (int) gyroPitchRatio);
+                            
+                        #endif
+                      
+                      // mode is controlled by the sign of gyro pitch ratio received in the GYRO_PITCH_CONTROL_CHANNEL from the TX
+                        if (gyroPitchRatio > 1700) {   // setting the channel (SBdown) at 1900µsec +/-100µsec activates the attitude hold gyro stabilization
+                                gyroPitchRatio = gyroPitchRatio - 1900; // ratio in +/-100
+                                gyroPitchMode = GYRO_MODE_HOLD;
+                        }
+                        else if (gyroPitchRatio < 1300) { //setting the channel (SBup) at 1100µsec +/-100µsec activates the angular rate gyro stabilization 
+                                gyroPitchRatio = gyroPitchRatio - 1100; // ratio in +/-100
+                                gyroPitchMode = GYRO_MODE_RATE;
+                        }
+                        else { // gyro control OFF. Store attitude and initial values of sticks
+                            gyroPitchRatio = 0;
+                            gyroPitchMode = GYRO_MODE_OFF;
+                            // latch initial values for next gyro hold or rate activation
+                            initialPitch = cameraPitch; //LSB = 1/10 deg
+                            //  // <<<<<<<<< [-1800, 1800] discontinuity at 180°
+                            if ((1800 - abs(initialPitch)) < 600) { // gyro is upside down or the plane, to avoid discontinuity, offset gyro roll
+                                gyroUpSideDown = 1;
+                                if (initialPitch < 0) initialPitch = initialPitch + 3600;
+                            }
+                            else gyroUpSideDown = 0;
+
+                            #ifdef GYRO_PITCH_CONTROL_CHANNEL
+                                pitchTrim = fmap( rcSbusOutChannels[GYRO_PITCH_CHANNEL - 1]  );
+                            #endif
+                        }
+
+                        // printf("%i\n",  (int) gyroPitchMode);
+                        
+                        _pwmValue = ((int16_t) fmap( rcSbusOutChannels[GYRO_PITCH_CHANNEL - 1]  )) ; // apply the ELE stick value
+                        //then apply gyro compensation according to mode
+                        if (gyroPitchMode == GYRO_MODE_RATE) {
+                            //apply compensation only when stick is close to neutral
+                            stickValue = abs(_pwmValue-pitchTrim);
+                            if (stickValue > GYRO_STICK_ATTENUATION*5) stickValue = GYRO_STICK_ATTENUATION*5;
+                            gyroPitchRatio = gyroPitchRatio * (1.0 -  ((float) stickValue / (float) GYRO_STICK_ATTENUATION*5));
+
+                            _pwmValue = _pwmValue - (int16_t) (gyroY * gyroPitchRatio * 0.05) ; 
+                        }
+
+                        if (gyroPitchMode == GYRO_MODE_HOLD) {
+                            //apply compensation only when stick is close to neutral
+                            stickValue = abs(_pwmValue-pitchTrim);
+                            if (stickValue > GYRO_STICK_ATTENUATION*5) stickValue = GYRO_STICK_ATTENUATION*5;
+                            gyroPitchRatio = gyroPitchRatio * (1.0 -  ((float) stickValue / (float) GYRO_STICK_ATTENUATION*5));
+                            _cameraPitch = cameraPitch;
+                            if ((gyroUpSideDown == 1) && (cameraPitch <0)) _cameraPitch = cameraPitch + 3600;  // check gyro upsidedown
+                            _pwmValue = _pwmValue - (int16_t) ((_cameraPitch-initialPitch) * gyroPitchRatio * 0.01) ; 
+                        }
+
+                        // normalize the values
+                        pwmMax = fmapMinMax(GYRO_PITCH_MAX);
+                        pwmMin = fmapMinMax(GYRO_PITCH_MIN);
+                        if (_pwmValue > pwmMax ) _pwmValue = pwmMax;
+                        if (_pwmValue < pwmMin ) _pwmValue = pwmMin;
+                        printf("%i %i %i  %i %i\n", (int) cameraPitch , (int) pwmValue , (int) _pwmValue, (int) gyroPitchRatio, (int) gyroY);
+                        pwmValue = _pwmValue;  // send the pwmvalue to the GYRO_PITCH_CHANNEL
+                    } 
+                #endif //GYRO_PITCH_CONTROL_CHANNEL
                 pwm_set_gpio_level (config.pinChannels[i], pwmValue) ;
             }
         } // end PWM is used

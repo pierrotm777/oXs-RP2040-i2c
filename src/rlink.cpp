@@ -35,10 +35,7 @@ void setupRlink(){
     gpio_pull_up(config.pinTlm);
 
     i2c_slave_init(i2c0, RLINK_I2C_ADDRESS, &i2c_rlink_handler);
-    // i2c_set_slave_mode(i2c0, true, RLINK_I2C_ADDRESS);
-    // *I2C0_INTR_MASK = I2C_INTR_MASK_RD_REQ;
-    // irq_set_exclusive_handler(I2C0_IRQ, runRlinkRequest);
-    // irq_set_enabled(I2C0_IRQ, true);
+
 }
 
 void runRlinkRequest()

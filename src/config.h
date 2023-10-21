@@ -1,7 +1,7 @@
 #pragma once
 
 #include <stdint.h>
-#define VERSION "2.8.0 & I2C"
+#define VERSION "2.8.40 & I2C & Gyro"
 
 //#define DEBUG  // force the MCU to wait for some time for the USB connection; still continue if not connected
 
@@ -17,6 +17,7 @@
 #define DATA_ID_GPS    0x83  //          3 used as P3
 #define DATA_ID_RPM    0xE4  //          4
 #define DATA_ID_ACC    0x67  //          7
+
 //list of all possible 28 device ID codes (in sequence)
 // 0x00,0xA1,0x22,0x83,0xE4,0x45,0xC6,0x67,0x48,0xE9,0x6A,0xCB,0xAC,0x0D,0x8E,0x2F, 
 // 0xD0,0x71,0xF2,0x53,0x34,0x95,0x16,0xB7,0x98,0x39,0xBA,0x1B
@@ -35,7 +36,7 @@
 //        the one with priority 5 will be transmitted about 10 X more often than the 2 others   
 // There is no need to set the value to 0 for fields not available (e.g. for GPS fields if GPS pins are undefined)
 // Note : currently some fields are never transmitted in exbus protocol (even if they have a valid value here)
-//        For more details about the fields, look at the file doc/fields_per_protocol.txt
+//        For more details about the fields, look at the file doc/fields_per_protocol.txt 
 
 
 #define P_LATITUDE             50
@@ -75,6 +76,9 @@
 #define P_SBUS_HOLD_COUNTER   100
 #define P_SBUS_FAILSAFE_COUNTER 100
 #define P_GPS_CUMUL_DIST      200  
+#define P_ACC_X                80
+#define P_ACC_Y                80
+#define P_ACC_Z                80
 
 
 // -------------- for ELRS protocol  ------------------------------
@@ -142,10 +146,10 @@
 
 
 // --------- Parameters to remap the SBUS Rc channel values to PWM values ---------
-#define FROM_SBUS_MIN 172
-#define TO_PWM_MIN 988
-#define FROM_SBUS_MAX 1811
-#define TO_PWM_MAX 2012
+#define FROM_SBUS_MIN 172  // This is equivalent to -100 on openTx
+#define TO_PWM_MIN 988     // this is the PWM usec for -100
+#define FROM_SBUS_MAX 1811  // This is equivalent to +100 on openTx
+#define TO_PWM_MAX 2012     // this is the PWM usec for +100
 
 // -------- Parameters for the vario -----
 #define SENSITIVITY_MIN 100
@@ -190,8 +194,15 @@
 #define SDPXX_ADDRESS   0x25 // 0x25 is the I2C adress of a SDP810 sensor
 //#define USE_ADP810_INSTEAD_OF_SDPxx  // uncoment this line if you use a ADP810 instead of a SDPxx
 
+// --------- Parameter for MPU6050 ---------------------------------------
+#define ACC_MAX_SCALE_G 2 // maximum acceleration in G (can only be 2,4,8, 16)
+
 // --------- Parameters for Compensated Vspeed by airspeed ----------------
 #define DTE_DEFAULT_COMPENSATION_FACTOR 1.10  // used when a channel is not used to setup the factor
+
+// ---------- ESC --------------------------------------------------------
+#define ESC_MAX_CURRENT 250.0
+#define ESC_MIN_THROTTLE 256    // used for Hobbywing V4 to reject dummy values ; 1024 = 100%; so e.g. 256 = 25% of max
 
 // -------------- Camera stabilizer ----------------------------------------
 // uncomment PITCH_CONTROL_CHANNEL and/or ROLL_CONTROL_CHANNEL if you want to stabilize a camera on those axis)
@@ -210,7 +221,117 @@
 //Note:  when a channel is used to adjust a ratio (for pitch or roll), the ratio can varies from -200 (channel = -100%) up to +200 (channel = %100%)
 //       the sign of the ratio define the direction of the compensation.
 //       Setting the channel on 0% dissables the compensation. This can e.g. be done using a switch on the TX
+// added aeropic
+// -------------- gyro stabilizer ----------------------------------------
+// uncomment GYRO_PITCH_CHANNEL and/or GYRO_ROLL_CHANNEL if you want to stabilize the plane on those axis
+
+#define GYRO_PITCH_CHANNEL 2            // Channel used to control the PITCH axis (ELE) from radio used as input then output to servo by OXS (2 if AETR)
+#define GYRO_ROLL_CHANNEL 1             // Channel used to control the ROLL axis (AIL) from radio used as input then output to servo by OXS (1 if AETR)
+#define GYRO_ROLL2_CHANNEL 5            // Channel used to control a second aileron; uncomment to activate - ROLL axis (AIL2) from radio used as input then output to servo by OXS (usually 5 if AETR)
+//#define GYRO_YAW_CHANNEL 4              // Channel used to control the YAW axis (RUD) from radio used as input by OXS (usually 4 if AETR) 
+
+// uncomment GYRO_PITCH/ROLL_CONTROL_CHANNEL to control de gyro mode and gain on this channel
+//One switch is needed per axis to be controlled, so that axis are fully independent
+//#define GYRO_PITCH_CONTROL_CHANNEL 13   // Channel used to control the ELEVATOR (pitch) on OXS; uncomment to activate the gyro pitch stabilization using a switch
+#define GYRO_PITCH_RATIO  20           // [-20,20] Ratio to use when GYRO_PITCH_CONTROL_CHANNEL is undefined; 
+                                        //increase/decrease the value in case of under/over stabilisation 
+                                        // change the sign if compensation goes in the wrong direction
+#define GYRO_PITCH_MAX 100              // adapt upper limit of servo travel (should normally be the same value as on TX) 
+#define GYRO_PITCH_MIN -100             // adapt lower limit of servo travel (should normally be the same value as on TX)
+
+#define GYRO_ROLL_CONTROL_CHANNEL 12    // Channel used to control the AILERON servo (roll) on OXS; uncomment to activate the gyro roll stabilization using a switch
+#define GYRO_ROLL2_SIGN 1               // set it to -1 to reverse the AILERON2 compensation
+#define GYRO_ROLL_RATIO  20            // [-20,20] Ratio to use when GYRO_ROLL_CONTROL_CHANNEL is undefined; 
+                                        //increase/decrease the value in case of under/over stabilisation 
+                                        // change the sign if compensation goes in the wrong direction
+#define GYRO_ROLL_MAX 100               // adapt upper limit of servo travel 
+#define GYRO_ROLL_MIN -100              // adapt lower limit of servo travel
+
+#define GYRO_STICK_ATTENUATION 40      // range of stick inputs in % where gyro compensation is applied (linear decrease, closest to center more effect)
+
+//#define GYRO_VTAIL                     // uncomment to get the VTAIL mixing (TODO)
+//#define GYRO_DELTA                     // uncomment to get the DELTA mixing (TODO)
+
+//Note:  when a channel is used to adjust a ratio (for gyro pitch or roll), the ratio can varies from -100 (channel = 1800 µsec) up to +100 (channel = 2000%)
+//       the sign of the ratio define the direction of the compensation.
+//       Setting the channel on 0% dissables the compensation. This can e.g. be done using a switch on the TX
+//       setting the channel at 1100µsec +/-100µsec activates the angular rate gyro stabilization 
+//       setting the channel at 1800µsec +/-100µsec activates the attitude hold gyro stabilization 
+
+// --------- Default parameters -------------
+// Many parameters can be edited using a serial monitor without having to compile/reflash the RP2040  
+// If you want to make an uf2 flie with specific parameters (and so, avoid having to use the serial monitor commands),
+//     you can change the default parameters in this section
+// Note: those parameters are used only for a RP2040 that did not yet had been configured (or when it has been completely erased)
+
+//#include "config_Jeti.h"
+//#include "config_Sport.h"
+#include "config_I2C.h"
+/*
+ #define _pinChannels_1  0XFF
+ #define _pinChannels_2  0XFF
+ #define _pinChannels_3  0XFF
+ #define _pinChannels_4  0XFF
+ #define _pinChannels_5  0XFF
+ #define _pinChannels_6  0XFF
+ #define _pinChannels_7  0XFF
+ #define _pinChannels_8  0XFF
+ #define _pinChannels_9  0XFF
+ #define _pinChannels_10  0XFF
+ #define _pinChannels_11  0XFF
+ #define _pinChannels_12  0XFF
+ #define _pinChannels_13  0XFF
+ #define _pinChannels_14  0XFF
+ #define _pinChannels_15  0XFF
+ #define _pinChannels_16  0XFF
+ #define _pinGpsTx  0XFF
+ #define _pinGpsRx  0XFF
+ #define _pinPrimIn  0XFF
+ #define _pinSecIn  0XFF 
+ #define _pinSbusOut  0XFF
+ #define _pinTlm  0XFF
+ #define _pinVolt_1  0XFF
+ #define _pinVolt_2  0XFF
+ #define _pinVolt_3  0XFF
+ #define _pinVolt_4  0XFF
+ #define _pinSda  0XFF
+ #define _pinScl  0XFF
+ #define _pinRpm  0XFF
+ #define _pinLed  16
+ #define _protocol  'S' // S = Sport, C = crossfire, J = Jeti
+ #define _crsfBaudrate  420000
+ #define _scaleVolt1  1.0
+ #define _scaleVolt2  1.0
+ #define _scaleVolt3  1.0
+ #define _scaleVolt4  1.0
+ #define _offset1  0.0
+ #define _offset2  0.0
+ #define _offset3  0.0
+ #define _offset4  0.0
+ #define _gpsType  'U' 
+ #define _rpmMultiplicator 1.0
+ #define _failsafeType  'H'
+//    crsf_channels_s failsafeChannels ;
+// #define _accOffsetX;
+// #define _accOffsetY;
+// #define _accOffsetZ;
+// #define _gyroOffsetX;
+// #define _gyroOffsetY;
+// #define _gyroOffsetZ;
+#define _temperature 0XFF
+#define _VspeedCompChannel 0XFF
+#define _ledInverted 'N'
+#define _CamPitchChannel 0xFF
+#define _CamRollChannel 0xFF
+#define _CamPitchRatio 0xFF
+#define _CamRollRatio 0xFF
+#define _pinLogger 0xFF
+#define _loggerBaudrate 115200
+#define _pinEsc 0xFF
+#define _escType 0xFF
+#define _pwmHz 50  // 50 hz per default
 // --------- Reserve for developer. ---------
+*/
 
 typedef struct {
   int32_t value ;
