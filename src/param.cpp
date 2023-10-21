@@ -1405,10 +1405,26 @@ void printConfigAndSequencers(){
     }    
 
     if ( config.CamPitchChannel !=255 && config.CamRollChannel !=255 && config.CamPitchRatio !=255 && config.CamRollRatio !=255) {
+
+    #if defined(GYRO_PITCH_CHANNEL) && defined(GYRO_ROLL_CHANNEL) && defined(GYRO_ROLL2_CHANNEL)
+        printf("Uncomment GYRO_PITCH_CHANNEL, GYRO_ROLL_CHANNEL, GYRO_ROLL2_CHANNEL and GYRO_YAW_CHANNEL into the param.cpp file\n");
+    #else
         printf("Stabilized Camera is ready\n");
+    #endif
     } else {
         printf("Stabilized Camera is not used\n");
     }
+
+#if defined(GYRO_PITCH_CHANNEL) && defined(GYRO_ROLL_CHANNEL) && defined(GYRO_ROLL2_CHANNEL)
+    #if defined (GYRO_YAW_CHANNEL)
+    printf("Stabilized Plane is ready (Pitch, Roll, Roll2 and Yaw Channels = %i, %i, %i, %i)\n", GYRO_PITCH_CHANNEL,GYRO_ROLL_CHANNEL,GYRO_ROLL2_CHANNEL,GYRO_YAW_CHANNEL);
+    #else
+    printf("Stabilized Plane is ready (Pitch, Roll and Roll2 Channels = %i, %i, %i)\n", GYRO_PITCH_CHANNEL,GYRO_ROLL_CHANNEL,GYRO_ROLL2_CHANNEL);
+    #endif
+#else
+    printf("Stabilized Plane is not used\n");
+#endif
+
     watchdog_update(); //sleep_ms(500);
     printSequencers(); 
     checkConfigAndSequencers();

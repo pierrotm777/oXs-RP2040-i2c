@@ -228,7 +228,7 @@
 #define GYRO_PITCH_CHANNEL 2            // Channel used to control the PITCH axis (ELE) from radio used as input then output to servo by OXS (2 if AETR)
 #define GYRO_ROLL_CHANNEL 1             // Channel used to control the ROLL axis (AIL) from radio used as input then output to servo by OXS (1 if AETR)
 #define GYRO_ROLL2_CHANNEL 5            // Channel used to control a second aileron; uncomment to activate - ROLL axis (AIL2) from radio used as input then output to servo by OXS (usually 5 if AETR)
-//#define GYRO_YAW_CHANNEL 4              // Channel used to control the YAW axis (RUD) from radio used as input by OXS (usually 4 if AETR) 
+#define GYRO_YAW_CHANNEL 4              // Channel used to control the YAW axis (RUD) from radio used as input by OXS (usually 4 if AETR) 
 
 // uncomment GYRO_PITCH/ROLL_CONTROL_CHANNEL to control de gyro mode and gain on this channel
 //One switch is needed per axis to be controlled, so that axis are fully independent
