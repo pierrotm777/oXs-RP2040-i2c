@@ -1,9 +1,12 @@
 #pragma once
+
 #include <ctype.h>
 #include "pico/stdlib.h"
 #include "crsf_frames.h"
+#include "gyro.h"
 
-#define CONFIG_VERSION 6
+#define CONFIG_VERSION 8
+
 struct CONFIG{
     uint8_t version = CONFIG_VERSION;
     uint8_t pinChannels[16] ;
@@ -49,11 +52,26 @@ struct CONFIG{
     uint32_t loggerBaudrate ;
     uint8_t pinEsc;
     uint8_t escType;
-    uint16_t pwmHz ; 
-    uint8_t CamPitchChannel = 0xFF;
-    uint8_t CamRollChannel = 0xFF;
-    uint8_t CamPitchRatio = 0xFF;
-    uint8_t CamRollRatio = 0xFF;     
+    uint16_t pwmHz ;
+    uint8_t CamPitchChannel;
+    uint8_t CamRollChannel;
+    uint8_t CamPitchRatio;
+    uint8_t CamRollRatio; 					  
+    //                for gyro
+    uint8_t gyroChanControl ; // Rc channel used to say if gyro is implemented or not and to select the mode and the general gain. Value must be in range 1/16 or 255 (no gyro)
+    uint8_t gyroChan[3] ;    // Rc channel used to transmit original Ail, Elv, Rud stick position ; Value must be in range 1/16 when gyroControlChannel is not 255
+    
+    struct _pid_param pid_param_rate; // each structure store the Kp, Ki, Kd parameters for each of the 3 axis; here for normal mode (= rate)
+    struct _pid_param pid_param_hold; // idem for hold mode
+    struct _pid_param pid_param_stab;  //each structure store the Kp, Ki, Kd parameters for each of the 3 axis; here for stabilize mode (= rate)
+    
+    int8_t vr_gain[3];          // store the gain per axis (to combine with global gain provided by gyroChanControl)
+    enum STICK_GAIN_THROW stick_gain_throw;  // this parameter allows to limit the compensation on a part of the stick travel (gain decreases more or less rapidly with stick offset)
+    enum MAX_ROTATE max_rotate;
+    enum RATE_MODE_STICK_ROTATE rate_mode_stick_rotate;
+    bool gyroAutolevel;           // true means that stabilize mode replies the Hold mode (on switch position)
+    uint8_t mpuOrientationH;       // define the orientation of the mpu when plane is horizontal;
+    uint8_t mpuOrientationV;       // define the orientation of the mpu when plane is vertical (nose up);
 };
 
 void handleUSBCmd(void);
@@ -74,7 +92,6 @@ void requestMpuCalibration();
 void printConfigOffsets();
 void printFieldValues();
 void printPwmValues();
-
 
 // for sequencer
 #define SEQUENCER_VERSION 4
@@ -146,8 +163,21 @@ void setupSequencers();
 //bool getSequencers();
 //bool getStepsSequencers();
 void checkSequencers();
-void saveSequencers(); // save pin sequencers and step definitions
+void saveSequencers(); // save all sequencers definitions
+
+
+void setupGyroMixer();
+void saveGyroMixer();  // save the gyro mixer collected during the learning process (mixer calibration)
+void printGyro(); 
+void printGyroMixer();
+
+bool getPid(uint8_t mode);  // get all pid parameters for one mode; return true if valid; config is then updated
+
 
 #define HW4 4
 #define HW3 3
 #define KONTRONIK 2
+#define ZTW1 1
+
+#define REQUEST_HORIZONTAL_MPU_CALIB 0X01
+#define REQUEST_VERTICAL_MPU_CALIB 0X02

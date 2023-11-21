@@ -23,9 +23,7 @@
     },
     "cmake.generator": "Ninja",
     "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
-    "C_Cpp.errorSquiggles": "disabled",
-    "files.associations": {
-        "typeinfo": "cpp",
-        "cmath": "cpp"
-    }
+    "githubPullRequests.ignoredPullRequestBranches": [
+        "main"
+    ]
 }

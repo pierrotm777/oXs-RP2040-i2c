@@ -80,11 +80,9 @@ enum fieldIdx {     // Internal Id for the measurements stored in oXs and that c
 #define SAVE_CONFIG_ID 0XFF
 #define CAMERA_PITCH_ID 0XFE
 #define CAMERA_ROLL_ID 0XFD
-
-// added aeropic
-#define GYRO_X_ID 0XFC
-#define GYRO_Y_ID 0XFB
-
+#define GYRO_X_ID      0XFC
+#define GYRO_Y_ID      0XFB
+#define GYRO_Z_ID      0XFA
 
 
 int32_t int_round(int32_t n, uint32_t d);
@@ -109,6 +107,8 @@ void enlapsedTime(uint8_t idx);
 void startTimerUs(uint8_t idx);                            // start a timer to measure enlapsed time
 void alarmTimerUs(uint8_t idx, uint32_t alarmExceedUs);    //  print a warning if enlapsed time exceed xx usec
 void getTimerUs(uint8_t idx);                              // print always the enlapsed time
+
+bool msgEverySec(uint8_t idx);                              // return true when more than 1 sec since previous call (per idx)
 
 void calculateAirspeed();
 

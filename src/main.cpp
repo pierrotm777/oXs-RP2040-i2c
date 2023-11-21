@@ -30,10 +30,9 @@
 #include "fbus.h"
 #include "srxl2.h"
 #include "sequencer.h"
-
 #include "rlink.h"// add PM
 #include "xbus.h"// add PM
-#include "hitec.h"// add PM
+#include "hitec.h"// add PM				   
 //#include "param.h"
 
 #include "ws2812.h"
@@ -47,6 +46,7 @@
 #include "hardware/timer.h"
 #include "logger.h"
 #include "esc.h"
+#include "gyro.h"
 
 // to do : add rpm, temp telemetry fields to jeti protocol
 //         try to detect MS5611 and other I2C testing the different I2C addresses
@@ -59,24 +59,28 @@
 //         test logger param in config parameters
 //         test tlm data in log interface
 //         it seems that in ELRS protocol, PWM are not generated since some version.
+//         use Rc channels with gyro correction to the signal Sbus out. 
+//         check if the gyro rate of mpu is the same as the one used in flightstab
+//         in mpu, when we apply offsets for acc and gyro, we should check that we do not exceed the 16 bits (or put the values in 32 bits)
+//         avoid gyro calibration at reset after a watchdog reset (to reduce start up time); not sure it is critical.
+//         add some check during the calibration that the model is not moving
 
 
 // Look at file in folder "doc" for more details
 //
-// So pio 0 sm0 is used for CRSF Tx  or for Sport TX or JETI TX or HOTT TX or MPX TX or SRXL2  (it uses max 6 bytes for Hott and a dma)
-//        0   1                         for Sport Rx            or HOTT RX or MPX RX or SRXL2  (it uses 9 bytes, 1 irq and no dma)
+// So pio 0 sm0 is used for CRSF Tx  or for Sport TX or JETI TX or HOTT TX or MPX TX or SRXL2 or Ibus (it uses max 6 bytes for Hott and a dma)
+//        0   1                         for Sport Rx            or HOTT RX or MPX RX or SRXL2 or Ibus (it uses 9 bytes, 1 irq0 and no dma)
 //        0   2            sbus out                                                            (it uses 4 bytes and one dma)       
 //        0   3            esc  Rx                                                             (it uses 9 bytes, 1 irq and no dma)
 
 //        1   0 is used for gps Tx  ; is unclaim when GPS config is done and reused             (it uses 4 bytes no dma)      
-//        1   0 is also used for gps Rx                                                         (it uses 9 bytes, 1 irq and no dma)
+//        1   0 is also used for gps Rx                                                         (it uses 9 bytes, 1 irq1 and no dma)
 
 //        1   1  is used for rpm                                                                       (it uses 3 bytes , no Irq, no dma)
-																															   
 //        1   2 is used for logger uart Tx                                                             (it uses 4 bytes, no irq and one dma) 
 //        1   3 is used for RGB led                                                                    (it uses 4 bytes, no irq and no dma)     
-// So UART0 is used for Secondary crsf of Sbus in ( was GPS before)
-//    UART1 is used for primary crsf in of SBUS IN (was only Sbus in before)
+// So UART0 is used for Secondary crsf in or Sbus in ( was GPS before)
+//    UART1 is used for primary crsf in or SBUS IN (was only Sbus in before)
  
 // note : GPS setup (on core 1) can end when core 1 is already in main loop; setup of logger (pio/dma) has to wait that gps set up is done 
 
@@ -138,6 +142,7 @@ extern bool newRcChannelsReceivedForLogger;  // used to know when we have to upd
 
 extern CONFIG config;
 bool configIsValid = true;
+bool configIsSaved = true ;
 bool configIsValidPrev = true;
 bool multicoreIsRunning = false;
 bool blinking = true ;
@@ -147,7 +152,8 @@ uint8_t prevLedState = STATE_NO_SIGNAL;
 uint32_t lastBlinkMillis;
 
 extern SEQUENCER seq;
-
+extern struct gyroMixer_t gyroMixer ; // contains the parameters provided by the learning process for each of the 16 Rc channel
+extern bool gyroIsInstalled ;
 queue_t qSensorData;       // send one sensor data to core0; when type=0XFF, it means a command then data= the command (e.g.0XFFFFFFFF = save config)
 queue_t qSendCmdToCore1;
 volatile bool core1SetupDone = false;
@@ -157,11 +163,11 @@ uint8_t forcedFields = 0; // use to debug a protocol; force the values when = 'P
 
 int32_t cameraPitch;
 int32_t cameraRoll;
+int16_t gyroX;
+int16_t gyroY;
+int16_t gyroZ;
 
-// added aeropic
-int32_t gyroX;
-int32_t gyroY;
-
+extern bool calibrateImuGyro ; // recalibrate the gyro or not at reset (avoid it after a watchdog reset)
 void setupI2c(){
     if ( config.pinScl == 255 || config.pinSda == 255) return; // skip if pins are not defined
     // send 10 SCL clock to force sensor to release sda
@@ -229,8 +235,8 @@ void setupSensors(){     // this runs on core1!!!!!!!!
       //printf("adc2 done\n");
       mpu.begin(); 
       //printf("mpu done\n");
-    //blinkRgb(0,10,0,500,1000000); blink red, green, blue at 500 msec for 1000 0000 X
-      gps.setupGps();  //use a Pio and 2 sm
+      //blinkRgb(0,10,0,500,1000000); blink red, green, blue at 500 msec for 1000 0000 X
+      gps.setupGps();  //use a Pio and 1 sm (in fact reuse the same sm for RX after TX)
       //printf("gps done\n");
       ms4525.begin();
       if (! ms4525.airspeedInstalled) {
@@ -300,6 +306,15 @@ void setColorState(){    // set the colors based on the RF link
         case STATE_FAILSAFE:
             setRgbColorOn(0, 0, 10); //blue
             break;
+        case STATE_GYRO_CAL_MIXER_NOT_DONE:
+            setRgbColorOn(10, 0, 0); //red
+            break;
+        case STATE_GYRO_CAL_MIXER_DONE:
+            setRgbColorOn(10, 5, 0); //yellow
+            break;
+        case STATE_GYRO_CAL_LIMIT:
+            setRgbColorOn(0, 0, 10); //blue
+            break;
         default:
             setRgbColorOn(10, 0, 0); //red
             break;     
@@ -347,8 +362,7 @@ void setup() {
   //bool clockChanged; 
   //clockChanged = set_sys_clock_khz(133000, false);
   set_sys_clock_khz(133000, false);
-  //setupLed();
-  //setRgbColorOn(10,0,10); // start with 2 color
+
   #ifdef DEBUG
   uint16_t counter = 10;                      // after an upload, watchdog_cause_reboot is true.
   //if ( watchdog_caused_reboot() ) counter = 0; // avoid the UDC wait time when reboot is caused by the watchdog   
@@ -361,55 +375,24 @@ void setup() {
   uint8_t a1[2] = {1, 2};
   int debug = 2;
   debugAX("aa", a1 , 2);
-  //int debug = 2;
-  //dp("test\n");
-  // test
-  //int32_t testValue = -10;
-  //printf("rounding -10 = %d\n" , ( int_round(testValue , 100) ) +500);
-  //testValue = -60;
-  //printf("rounding -60 = %d\n" , ( int_round(testValue , 100) ) +500);
-  //testValue = -200;
-  //printf("rounding -200 = %d\n" , ( int_round(testValue , 100) ) +500);
-  //testValue = +10;
-  //printf("rounding +10 = %d\n" , ( int_round(testValue , 100) ) +500);
-  //testValue = +60;
-  //printf("rounding +60 = %d\n" , ( int_round(testValue , 100) ) +500);
-  //uint8_t readBuffer[2] = {0XFF, 0XFE}; 
-  //printf("test %f\n",(float) ((int16_t) (readBuffer[0] << 8 | readBuffer[1] & 0X00FF)));
-  //int16_t test = 0X7B03;
-  //int32_t testi32 = (int32_t) test;
-  //uint8_t testFirst = * (&test);
-  //printf("test %X %X %X\n",  test , testi32 , testFirst) ; 
-  //if (hardware_alarm_is_claimed(0)) printf("alarm 0 is used\n");
-  //if (hardware_alarm_is_claimed(1)) printf("alarm 1 is used\n");
-  //if (hardware_alarm_is_claimed(2)) printf("alarm 2 is used\n");
-  //if (hardware_alarm_is_claimed(3)) printf("alarm 3 is used\n");
-  //hardware_alarm_set_callback(2 , test_callback);
-  //hardware_alarm_set_target(2 , time_us_64()+200);
-  //hardware_alarm_set_target(2 , time_us_64()+700);
-  //sleep_us(100);
-  //printf("testU8= %d\n", (int) testU8);
-  //sleep_us(200);
-  //printf("testU8= %d\n", (int) testU8);
-  //sleep_us(700);
-  //printf("testU8= %d\n", (int) testU8);
   #endif
   
   if (watchdog_caused_reboot()) {
         printf("Rebooted by Watchdog!\n");
+        calibrateImuGyro = false;
     } else {
         printf("Clean boot\n");
+        calibrateImuGyro = true;
         //sleep_ms(1000); // wait that GPS is initialized
     }
-																						  
   setupConfig(); // retrieve the config parameters (crsf baudrate, voltage scale & offset, type of gps, failsafe settings)  
   setupSequencers(); // retrieve the sequencer parameters (defsMax, stepsMax, defs and steps)
+  setupGyroMixer(); 
   checkConfigAndSequencers();     // check if config and sequencers are valid (print error message; configIsValid is set on true or false)
   setupLed();
-  //setRgbColorOn(10,0,10); // start with 2 color
   setRgbColorOn(0,0,10);  // switch to blue during the setup of different sensors/pio/uart
   
-  if (configIsValid){ // continue with setup only if config is valid
+  if (configIsValid) { // continue with setup only if config is valid 
       for (uint8_t i = 0 ;  i< NUMBER_MAX_IDX ; i++){ // initialise the list of fields being used 
         fields[i].value= 0;
         fields[i].available= false;
@@ -469,7 +452,6 @@ void setup() {
         setupExbus();
         //setupSbus2In(); // to do add a second input
         //setupSbus2Tlm();
-        
       /* Add I2C Protocols */
       } else if (config.protocol == 'R') {   // Radiolink
         setupRlink();
@@ -479,7 +461,6 @@ void setup() {
         setupHitec();
       }
       /* Add I2C Protocols */
-
       if (config.pinSbusOut != 255) { // configure 1 pio/sm for SBUS out (only if Sbus out is activated in config).
           setupSbusOutPio();
         }
@@ -487,6 +468,10 @@ void setup() {
       if ( config.pinLogger != 255) {
         logger.begin();           // set up the logger
       }
+      if ((config.gyroChanControl <= 16) and (mpu.mpuInstalled)) { // when the channel to control the gyro is defined and a mpu.installed
+        gyroIsInstalled=true;
+      }
+      
       watchdog_enable(3500, 0); // require an update once every 500 msec
   } 
   printConfigAndSequencers(); 
@@ -497,8 +482,14 @@ void setup() {
   } else {
     printf("clock is not changed\n");
   }
-  */ 
+   
     //checkLedColors(); // this program does not end and so main loop is not called.
+  if(gyroIsInstalled){
+    printf("gyro is installed\n");
+  }  else{ 
+    printf("gyro is not installed\n");
+  }
+  */
 }
 
 void getSensorsFromCore1(){
@@ -527,10 +518,15 @@ void getSensorsFromCore1(){
                     cameraPitch = entry.data;
                 } else if (entry.type == CAMERA_ROLL_ID) {
                     cameraRoll = entry.data;
-                } else if (entry.type == GYRO_X_ID) {  // added aeropic  filter on gyro angular rates
-                    gyroX = (15*gyroX + entry.data)/16; // added aeropic
-                } else if (entry.type == GYRO_Y_ID) { // added aeropic
-                    gyroY = (15*gyroY + entry.data)/16; // added aeropic
+                } else if (entry.type == GYRO_X_ID) {  
+                    gyroX = (15*gyroX + entry.data) >> 4;  // here some filtering because oXs use a BW=188 for mpu instead of BW=5 for flightstab in gyro setting.
+                    //gyroX = entry.data;
+                } else if (entry.type == GYRO_Y_ID) { 
+                    gyroY = (15*gyroY + entry.data) >>4 ;
+                    //gyroY = entry.data; 
+                } else if (entry.type == GYRO_Z_ID) { 
+                    gyroZ = (15*gyroZ + entry.data) >> 4;
+                    //gyroZ = entry.data;
                 } else {
                     printf("error : invalid type of sensor = %d\n", entry.type);
                 }    
@@ -556,7 +552,7 @@ void getSensorsFromCore1(){
     }
     if ((forcedFields == 1) || (forcedFields == 2)) fillFields(forcedFields); // force dummy values for debuging a protocol
 }
-
+/*
 void printTest(int testVal){
     static uint32_t prevTime = 0;
     if ((millisRp() - prevTime) > 10) { // once per 5 sec
@@ -565,13 +561,14 @@ void printTest(int testVal){
         if (configIsValid) {printf("config is valid\n");} else {printf("config is not valid\n");} 
     }
 }
+*/
 
 #define MAIN_LOOP 0
 void loop() {
   //debugBootButton();
     //startTimerUs(MAIN_LOOP);                            // start a timer to measure enlapsed time
 
-  if (configIsValid){
+  if ((configIsValid) and (configIsSaved)) {
       getSensorsFromCore1(); // this also generate the LOG signal on pio UART
       mergeSeveralSensors();
       watchdog_update();
@@ -629,8 +626,11 @@ void loop() {
         //handleHitec();
       }
       watchdog_update();
-      updatePWM(); // update PWM pins only based on channel value (not sequencer)
-            //updatePioPwm();
+      if (gyroIsInstalled) {
+        calibrateGyroMixers();   // check if user ask for gyro calibration 
+      }
+      updatePWM(); // update PWM pins only based on channel value (not sequencer); this will call applyGyroCorrections if gyro is used
+      
       sequencerLoop();  // update PWM pins based on sequencer
       if ((config.pinLogger != 255) && (newRcChannelsReceivedForLogger)) { // when logger is on and new RC data have been converted in uint16
         newRcChannelsReceivedForLogger = false; // reset the flag allowing a log of RC channels
@@ -650,7 +650,7 @@ void loop() {
   //printf("after tud-task\n");sleep_ms(100); 
   if ( configIsValidPrev != configIsValid) {
     configIsValidPrev = configIsValid;
-    if (configIsValid) {
+    if ((configIsValid) and (configIsSaved)){
         blinking = true; // setRgbColorOn(0,10,0); // red , green , blue
     } else {
         blinking = false; // setRgbColorOn(10,0,0);
@@ -689,10 +689,13 @@ void loop1(){
     //startTimerUs(MAIN_LOOP1);
     uint8_t qCmd;
     getSensors(); // get sensor
+    // get some request from core0
     if ( ! queue_is_empty(&qSendCmdToCore1)){
         queue_try_remove(&qSendCmdToCore1, &qCmd);
-        if ( qCmd == 0X01) { // 0X01 is the code to request a calibration
-            mpu.calibrationExecute();
+        if ( qCmd == REQUEST_HORIZONTAL_MPU_CALIB) { // 0X01 is the code to request an horizontal calibration
+            mpu.calibrationHorizontalExecute();
+        } else if ( qCmd == REQUEST_VERTICAL_MPU_CALIB) { // 0X02 is the code to request a vertical calibration
+            mpu.calibrationVerticalExecute();
         }
     }
     //alarmTimerUs(MAIN_LOOP1, 500);

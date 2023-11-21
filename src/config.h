@@ -1,7 +1,7 @@
 #pragma once
 
 #include <stdint.h>
-#define VERSION "2.8.40 & I2C & Gyro"
+#define VERSION "2.10.10 & I2C"
 
 //#define DEBUG  // force the MCU to wait for some time for the USB connection; still continue if not connected
 
@@ -196,12 +196,13 @@
 
 // --------- Parameter for MPU6050 ---------------------------------------
 #define ACC_MAX_SCALE_G 2 // maximum acceleration in G (can only be 2,4,8, 16)
-
+#define GYRO_MAX_SCALE_DEGREE 2000  // max gyro rate : degree per sec
+#define CALIBRATE_GYRO_ON_RESET     // uncomment to avoid gyro calibration on reset
 // --------- Parameters for Compensated Vspeed by airspeed ----------------
 #define DTE_DEFAULT_COMPENSATION_FACTOR 1.10  // used when a channel is not used to setup the factor
 
 // ---------- ESC --------------------------------------------------------
-#define ESC_MAX_CURRENT 250.0
+#define ESC_MAX_CURRENT 250000.0
 #define ESC_MIN_THROTTLE 256    // used for Hobbywing V4 to reject dummy values ; 1024 = 100%; so e.g. 256 = 25% of max
 
 // -------------- Camera stabilizer ----------------------------------------
@@ -221,42 +222,11 @@
 //Note:  when a channel is used to adjust a ratio (for pitch or roll), the ratio can varies from -200 (channel = -100%) up to +200 (channel = %100%)
 //       the sign of the ratio define the direction of the compensation.
 //       Setting the channel on 0% dissables the compensation. This can e.g. be done using a switch on the TX
-// added aeropic
-// -------------- gyro stabilizer ----------------------------------------
-// uncomment GYRO_PITCH_CHANNEL and/or GYRO_ROLL_CHANNEL if you want to stabilize the plane on those axis
 
-#define GYRO_PITCH_CHANNEL 2            // Channel used to control the PITCH axis (ELE) from radio used as input then output to servo by OXS (2 if AETR)
-#define GYRO_ROLL_CHANNEL 1             // Channel used to control the ROLL axis (AIL) from radio used as input then output to servo by OXS (1 if AETR)
-#define GYRO_ROLL2_CHANNEL 5            // Channel used to control a second aileron; uncomment to activate - ROLL axis (AIL2) from radio used as input then output to servo by OXS (usually 5 if AETR)
-#define GYRO_YAW_CHANNEL 4              // Channel used to control the YAW axis (RUD) from radio used as input by OXS (usually 4 if AETR) 
+// --------- Gyro Parameters ---------------
+// 
 
-// uncomment GYRO_PITCH/ROLL_CONTROL_CHANNEL to control de gyro mode and gain on this channel
-//One switch is needed per axis to be controlled, so that axis are fully independent
-//#define GYRO_PITCH_CONTROL_CHANNEL 13   // Channel used to control the ELEVATOR (pitch) on OXS; uncomment to activate the gyro pitch stabilization using a switch
-#define GYRO_PITCH_RATIO  20           // [-20,20] Ratio to use when GYRO_PITCH_CONTROL_CHANNEL is undefined; 
-                                        //increase/decrease the value in case of under/over stabilisation 
-                                        // change the sign if compensation goes in the wrong direction
-#define GYRO_PITCH_MAX 100              // adapt upper limit of servo travel (should normally be the same value as on TX) 
-#define GYRO_PITCH_MIN -100             // adapt lower limit of servo travel (should normally be the same value as on TX)
 
-#define GYRO_ROLL_CONTROL_CHANNEL 12    // Channel used to control the AILERON servo (roll) on OXS; uncomment to activate the gyro roll stabilization using a switch
-#define GYRO_ROLL2_SIGN 1               // set it to -1 to reverse the AILERON2 compensation
-#define GYRO_ROLL_RATIO  20            // [-20,20] Ratio to use when GYRO_ROLL_CONTROL_CHANNEL is undefined; 
-                                        //increase/decrease the value in case of under/over stabilisation 
-                                        // change the sign if compensation goes in the wrong direction
-#define GYRO_ROLL_MAX 100               // adapt upper limit of servo travel 
-#define GYRO_ROLL_MIN -100              // adapt lower limit of servo travel
-
-#define GYRO_STICK_ATTENUATION 40      // range of stick inputs in % where gyro compensation is applied (linear decrease, closest to center more effect)
-
-//#define GYRO_VTAIL                     // uncomment to get the VTAIL mixing (TODO)
-//#define GYRO_DELTA                     // uncomment to get the DELTA mixing (TODO)
-
-//Note:  when a channel is used to adjust a ratio (for gyro pitch or roll), the ratio can varies from -100 (channel = 1800 µsec) up to +100 (channel = 2000%)
-//       the sign of the ratio define the direction of the compensation.
-//       Setting the channel on 0% dissables the compensation. This can e.g. be done using a switch on the TX
-//       setting the channel at 1100µsec +/-100µsec activates the angular rate gyro stabilization 
-//       setting the channel at 1800µsec +/-100µsec activates the attitude hold gyro stabilization 
 
 // --------- Default parameters -------------
 // Many parameters can be edited using a serial monitor without having to compile/reflash the RP2040  
@@ -266,8 +236,8 @@
 
 //#include "config_Jeti.h"
 //#include "config_Sport.h"
-#include "config_I2C.h"
-/*
+//#include "config_I2C.h"
+
  #define _pinChannels_1  0XFF
  #define _pinChannels_2  0XFF
  #define _pinChannels_3  0XFF
@@ -330,8 +300,61 @@
 #define _pinEsc 0xFF
 #define _escType 0xFF
 #define _pwmHz 50  // 50 hz per default
+
+// ------  for gyro   -------
+#define _gyroChanControl 0xFF // Rc channel used to say if gyro is implemented or not and to select the mode and the general gain. Value must be in range 1/16 or 255 (no gyro)
+#define _gyroChan_AIL    0xFF // Rc channel used to transmit original Ail (Elv, Rud) stick position ; Value must be in range 1/16 when gyroControlChannel is not 255
+#define _gyroChan_ELV    0xFF //                                           ELV
+#define _gyroChan_RUD    0xFF //                                                RUD
+#define _pid_param_rate_KP_AIL 500  // PID rates: normal mode - Kp - ail (roll)
+#define _pid_param_rate_KP_ELV 500  // PID rates: normal mode - Kp - elv (pitch)
+#define _pid_param_rate_KP_RUD 500  // PID rates: normal mode - Kp - rud (yaw)
+#define _pid_param_hold_KP_AIL 500  // PID rates: hold   mode - Kp - ail (roll)
+#define _pid_param_hold_KP_ELV 500  // PID rates: hold   mode - Kp - elv (pitch)
+#define _pid_param_hold_KP_RUD 500  // PID rates: hold   mode - Kp - rud (yaw)
+#define _pid_param_stab_KP_AIL 500  // PID rates: hold   mode - Kp - ail (roll)
+#define _pid_param_stab_KP_ELV 500  // PID rates: hold   mode - Kp - elv (pitch)
+#define _pid_param_stab_KP_RUD 500  // PID rates: hold   mode - Kp - rud (yaw)
+
+#define _pid_param_rate_KI_AIL   0  // PID rates: normal mode - Ki - ail (roll)   // set ki to 0 for normal mode
+#define _pid_param_rate_KI_ELV   0  // PID rates: normal mode - Ki - elv (pitch)  // set ki to 0 for normal mode
+#define _pid_param_rate_KI_RUD   0  // PID rates: normal mode - Ki - rud (yaw)    // set ki to 0 for normal mode
+#define _pid_param_hold_KI_AIL 500  // PID rates: hold   mode - Ki - ail (roll)
+#define _pid_param_hold_KI_ELV 500  // PID rates: hold   mode - Ki - elv (pitch)
+#define _pid_param_hold_KI_RUD 500  // PID rates: hold   mode - Ki - rud (yaw)
+#define _pid_param_stab_KI_AIL   0  // PID rates: hold   mode - Ki - ail (roll)
+#define _pid_param_stab_KI_ELV   0  // PID rates: hold   mode - Ki - elv (pitch)
+#define _pid_param_stab_KI_RUD   0  // PID rates: hold   mode - Ki - rud (yaw)
+
+#define _pid_param_rate_KD_AIL 500  // PID rates: normal mode - Kd - ail (roll)
+#define _pid_param_rate_KD_ELV 500  // PID rates: normal mode - Kd - elv (pitch)
+#define _pid_param_rate_KD_RUD 500  // PID rates: normal mode - Kd - rud (yaw)
+#define _pid_param_hold_KD_AIL 500  // PID rates: hold   mode - Kd - ail (roll)
+#define _pid_param_hold_KD_ELV 500  // PID rates: hold   mode - Kd - elv (pitch)
+#define _pid_param_hold_KD_RUD 500  // PID rates: hold   mode - Kd - rud (yaw)
+#define _pid_param_stab_KD_AIL 500  // PID rates: hold   mode - Kd - ail (roll)
+#define _pid_param_stab_KD_ELV 500  // PID rates: hold   mode - Kd - elv (pitch)
+#define _pid_param_stab_KD_RUD 500  // PID rates: hold   mode - Kd - rud (yaw)
+
+#define _pid_param_rate_output_shift 8 // do not modify
+#define _pid_param_hold_output_shift 8 // do not modify
+#define _pid_param_stab_output_shift 8 // do not modify
+
+#define _vr_gain_AIL       127      // store the gain per axis (to combine with global gain provided by gyroChanControl) (0/127 or 0/-127 to reverse )
+#define _vr_gain_ELV       127      // store the gain per axis (to combine with global gain provided by gyroChanControl) (0/127 or 0/-127 to reverse )
+#define _vr_gain_RUD       127      // store the gain per axis (to combine with global gain provided by gyroChanControl) (0/127 or 0/-127 to reverse ) 
+#define _stick_gain_throw     1     // STICK_GAIN_THROW_FULL=1, STICK_GAIN_THROW_HALF=2, STICK_GAIN_THROW_QUARTER=3} 
+                                    // STICK_GAIN_THROW allows to limit the compensation on a part of the stick travel (gain decreases more or less rapidly with stick offset)
+#define _max_rotate           3     // MAX_ROTATE_VLOW=1, MAX_ROTATE_LOW=2, MAX_ROTATE_MED=3, MAX_ROTATE_HIGH=4
+                                    // MAX_ROTATE is used in hold mode (correction depends more or less on stick offset)
+#define _rate_mode_stick_rotate  1  // RATE_MODE_STICK_ROTATE_DISABLE=1, RATE_MODE_STICK_ROTATE_ENABLE=2
+                                    // MAX_ROTATE is used also in rate mode when RATE_MODE_STICK_ROTATE_ENABLE is selected
+#define _gyroAutolevel true         // true means that stabilize mode replace hold mode
+#define _mpuOrientationH 4           // upper face when plane is horizontal, last 4 bits= axis being up when nose is up; default is 4 (Z axis point up)
+#define _mpuOrientationV 0           // upper face when plane is vertical (nose up) ; default is 0 (X axis point to the nose)
+                                        // for both  0=X+, 1=X- , 2=Y+ , 3=Y- , 4=Z+, 5=Z- , 6=error ;																									  
 // --------- Reserve for developer. ---------
-*/
+
 
 typedef struct {
   int32_t value ;

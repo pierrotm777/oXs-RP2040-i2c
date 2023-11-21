@@ -20,8 +20,6 @@
 
 extern CONFIG config;
 
-#define CRSF_UART_ID uart1 // used by primary receiver
-#define CRSF2_UART_ID uart0 // used by secondary receiver
 
 //#define DEBUGPRIM    // print a line when a frame is received from Primary ELRS receiver
 //#define DEBUGSEC     // print a line when a frame is received from secondary ELRS receiver 
@@ -181,7 +179,7 @@ void handleCrsfIn(void){   // called by main loop : receive the CRSF frame
                     memcpy(&sbusFrame.rcChannelsData, crsfBufferRcChannels , RC_PAYLOAD_LENGTH) ;
                     lastRcChannels = millisRp();
                     lastPriChannelsMillis = lastRcChannels ;
-					newRcChannelsReceivedForPWM = true;  // used to update the PWM data
+                    newRcChannelsReceivedForPWM = true;  // used to update the PWM data
                     #ifdef DEBUGPRIM
                     printf("Prim= ");
                     for (uint8_t i=0 ; i < RC_PAYLOAD_LENGTH; i++) {
@@ -246,8 +244,8 @@ void handleCrsf2In(void){   // called by main loop : receive the CRSF frame
                     // we got a good frame; we can save for later use
                     memcpy(&sbusFrame.rcChannelsData, crsf2BufferRcChannels , RC_PAYLOAD_LENGTH) ;
                     lastRcChannels = millisRp();
-                    lastSecChannelsMillis = lastRcChannels ; 
-					newRcChannelsReceivedForPWM = true;  // used to update the PWM data 
+                    lastSecChannelsMillis = lastRcChannels ;
+                    newRcChannelsReceivedForPWM = true;  // used to update the PWM data 
                     //printf("S\n");
                     #ifdef DEBUGSEC
                     printf("Sec = ");
