@@ -1,7 +1,7 @@
 #pragma once
 
 #include <stdint.h>
-#define VERSION "2.10.10 & I2C"
+#define VERSION "2.11.1 & I2C"
 
 //#define DEBUG  // force the MCU to wait for some time for the USB connection; still continue if not connected
 
@@ -145,6 +145,9 @@
 //#define MPX_ALARM_CM_MAX 12000  // alarm when relative altitude (in cm) is higher than this value
 
 
+// -------- Parameters for SRXL2 protocol ---------------------------
+//#define USE_GPS_BCD_INSTEAD_OF_BINARY  // default is GPS binary format used; uncomment this line if you want to use BCD format instead of binary 
+                                       // this has been added because old handset does not support binary format.
 // --------- Parameters to remap the SBUS Rc channel values to PWM values ---------
 #define FROM_SBUS_MIN 172  // This is equivalent to -100 on openTx
 #define TO_PWM_MIN 988     // this is the PWM usec for -100
@@ -202,18 +205,18 @@
 #define DTE_DEFAULT_COMPENSATION_FACTOR 1.10  // used when a channel is not used to setup the factor
 
 // ---------- ESC --------------------------------------------------------
-#define ESC_MAX_CURRENT 250000.0
+#define ESC_MAX_CURRENT 250000.0// used for Hobbywing V4 to reject dummy values ; 250000 is in ma = 250 A 
 #define ESC_MIN_THROTTLE 256    // used for Hobbywing V4 to reject dummy values ; 1024 = 100%; so e.g. 256 = 25% of max
 
 // -------------- Camera stabilizer ----------------------------------------
 // uncomment PITCH_CONTROL_CHANNEL and/or ROLL_CONTROL_CHANNEL if you want to stabilize a camera on those axis)
  
-#define PITCH_CONTROL_CHANNEL config.CamPitchChannel // Channel used to control the servo for the camera (pitch); uncomment to activate the pitch stabilization
+//#define PITCH_CONTROL_CHANNEL config.CamPitchChannel // Channel used to control the servo for the camera (pitch); uncomment to activate the pitch stabilization
 #define PITCH_RATIO_CHANNEL config.CamPitchRatio   // Channel used to set up the ratio between pitch and servo movement (optional)
 #define PITCH_RATIO  100  // Ratio to use when PITCH_RATIO_CHANNEL is undefined (or 255); increase/decrease the value in case of under/over stabilisation  
 #define PITCH_MAX 100     // adapt upper limit of servo travel (should normally be the same value as on TX) 
 #define PITCH_MIN -100    // adapt lower limit of servo travel (should normally be the same value as on TX)
-#define ROLL_CONTROL_CHANNEL config.CamRollChannel// Channel used to control the servo for the camera (roll); uncomment to activate the roll stabilization
+//#define ROLL_CONTROL_CHANNEL config.CamRollChannel// Channel used to control the servo for the camera (roll); uncomment to activate the roll stabilization
 #define ROLL_RATIO_CHANNEL config.CamRollRatio    // Channel used to set up the ratio between roll and servo movement
 #define ROLL_RATIO  100  // Ratio to use when ROLL_RATIO_CHANNEL is undefined (or 255); increase/decrease the value in case of under/over stabilisation
 #define ROLL_MAX 100     // adapt upper limit of servo travel 

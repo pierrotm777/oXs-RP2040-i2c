@@ -816,10 +816,10 @@ typedef struct
 {
 	uint8_t		identifier;														// Source device = 0x16
 	uint8_t		sID;															// Secondary ID
-	uint16_t		altitudeLow;													// BCD, meters, format 3.1 (Low order of altitude)
-	uint32_t		latitude;														// BCD, format 4.4, Degrees * 100 + minutes, less than 100 degrees
-	uint32_t		longitude;														// BCD, format 4.4 , Degrees * 100 + minutes, flag indicates > 99 degrees
-	uint16_t		course;															// BCD, 3.1
+	uint16_t	altitudeLow;													// BCD, meters, format 3.1 (Low order of altitude)
+	uint32_t	latitude;														// BCD, format 4.4, Degrees * 100 + minutes, less than 100 degrees
+	uint32_t	longitude;														// BCD, format 4.4 , Degrees * 100 + minutes, flag indicates > 99 degrees
+	uint16_t	course;															// BCD, 3.1
 	uint8_t		HDOP;															// BCD, format 1.1
 	uint8_t		GPSflags;														// see definitions below
 } __attribute__((packed)) STRU_TELE_GPS_LOC;
@@ -828,10 +828,13 @@ typedef struct
 {
 	uint8_t		identifier;														// Source device = 0x17
 	uint8_t		sID;															// Secondary ID
-	uint16_t		speed;															// BCD, knots, format 3.1
-	uint32_t		UTC;															// BCD, format HH:MM:SS.S, format 6.1
+	uint16_t	speed;															// BCD, knots, format 3.1
+	uint32_t	UTC;															// BCD, format HH:MM:SS.S, format 6.1
 	uint8_t		numSats;														// BCD, 0-99
 	uint8_t		altitudeHigh;													// BCD, meters, format 2.0 (High order of altitude)
+    uint16_t    notUsed1;   // added by mstrens to get a payload of 16 like other frames
+    uint16_t    notUsed2;   // added by mstrens to get a payload of 16 like other frames
+    uint16_t    notUsed3;   // added by mstrens to get a payload of 16 like other frames
 } __attribute__((packed)) STRU_TELE_GPS_STAT;
 
 // GPS flags definitions:

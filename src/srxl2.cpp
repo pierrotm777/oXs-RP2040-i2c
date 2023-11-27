@@ -106,6 +106,8 @@
               
 #define SRXL2_ALARM_NUM_UART_IDLE 2 // number of the timer alarm used to detect uart idle. (alarm3 is sued by watchdog!)
 
+#define GPS_DEGREES_DIVIDER 10000000  // Gps long and lat are in deg with 7 decimals
+
 
 extern CONFIG config;
 queue_t srxl2RxQueue ;
@@ -434,7 +436,7 @@ void srxl2ProcessIncomingFrame(){
         } 
         // we do not have to reply to other handshake frame
     } else {  // we got a control data frame
-// 0XA6 + 0XCD + lenght + command (0=channels, 1=failsafe) + ReplyId + payload + CRC (2 bytes)
+// 0XA6 + 0XCD + length + command (0=channels, 1=failsafe) + ReplyId + payload + CRC (2 bytes)
 //         payload for channels= RSSI(I8) + frameLosses(U16) + channel mask(U32) + n*channel(U16) (n depends on mask)
 //         payload for Failsafe= RSSI(I8) + hold(U16) + channel mask(U32) + n*channel(U16) (n depends on mask) 
         // when we get a control data for oXs, we reply with a telemetry frame (if data are available)
@@ -559,9 +561,9 @@ void fbusDecodeRcChannels(){             // this code is similar to Sbus in
 // we use also a dummy value SRXL2_USE_TLM_FOR_HANDSHAKE_REQUEST = 0xFF to request a handshake
 
 uint8_t srxl2PriorityList[] = { TELE_DEVICE_VARIO_S , TELE_DEVICE_GPS_BINARY , TELE_DEVICE_AIRSPEED , TELE_DEVICE_ESC,
-                                 TELE_DEVICE_RX_MAH };
-uint8_t srxl2MaxPooling[]  = { 4, 8, 10, 10, 10, 10};
-uint8_t srxl2MinPooling[]  = { 2, 4, 5, 5, 5, 5};                                
+                                 TELE_DEVICE_GPS_LOC , TELE_DEVICE_GPS_STATS , TELE_DEVICE_RX_MAH };
+uint8_t srxl2MaxPooling[]  = { 4, 8, 10, 10, 8, 8, 10, 10};
+uint8_t srxl2MinPooling[]  = { 2, 4, 5, 5, 4, 4, 5, 5};                                
 uint32_t srxl2LastPoolingNr[NUMBER_MAX_IDX] = {0}; // contains the last Pooling nr for each frame
 uint32_t srxl2PoolingNr= 0; // contains the current Pooling nr
 
@@ -576,8 +578,8 @@ bool srxl2FillTelemetryFrame(){
     bool dataAvailableForFrame[numberOfFrames] = {false}; 
     // first we search the first field 
     for (uint8_t i = 0 ; i< numberOfFrames ; i++ ){
-        if (srxl2IsFrameDataAvailable(i)) {  // test if some data are available and if so, fill the frame in the structure
-            if (currentPollingNr >= (srxl2LastPoolingNr[i] + srxl2MaxPooling[i])){
+        if (currentPollingNr >= (srxl2LastPoolingNr[i] + srxl2MaxPooling[i])){
+            if (srxl2IsFrameDataAvailable(i)) {  // test if some data are available and if so, fill the frame in the structure
                 srxl2FillTXBuffer(i);    // copy the payload into the TX buffer and fill header and crc
                 srxl2LastPoolingNr[i] = currentPollingNr; // store pooling that has been used 
                 return true;
@@ -586,8 +588,8 @@ bool srxl2FillTelemetryFrame(){
     } // end for
     // repeat base on min (knowing that the payload are already filled by srxl2IsFrameDataAvailable())
     for (uint8_t i = 0 ; i< numberOfFrames ; i++ ){
-        if (dataAvailableForFrame[i]) {  // if data is available
-            if (currentPollingNr >= (srxl2LastPoolingNr[i] + srxl2MinPooling[i])){
+        if (currentPollingNr >= (srxl2LastPoolingNr[i] + srxl2MinPooling[i])){
+            if (dataAvailableForFrame[i]) {  // if data is available
                 srxl2FillTXBuffer(i);
                 srxl2LastPoolingNr[i] = currentPollingNr; // store pooling that has been used 
                 return true;
@@ -631,6 +633,7 @@ bool srxl2IsFrameDataAvailable(uint8_t frameIdx){
                 return true;
             } 
             break;
+        #ifndef USE_GPS_BCD_INSTEAD_OF_BINARY    
         case 1: //TELE_DEVICE_GPS_BINARY
             if (fields[NUMSAT].available) {
                 srxl2Frames.gps.identifier = TELE_DEVICE_GPS_BINARY; //0X26
@@ -664,18 +667,20 @@ bool srxl2IsFrameDataAvailable(uint8_t frameIdx){
                 }
                 
 	            if (fields[GROUNDSPEED].available) {
-                    srxl2Frames.gps.groundSpeed = (uint8_t) (int_round(fields[HEADING].value * 36, 1000)); // cm/sec to Km/h
+                    srxl2Frames.gps.groundSpeed = (uint8_t) (int_round(fields[GROUNDSPEED].value * 36, 1000)); // cm/sec to Km/h
                 } else {
                     srxl2Frames.gps.groundSpeed = 0XFF;
                 }
                 if (fields[NUMSAT].available) {
                     srxl2Frames.gps.numSats = (uint8_t) fields[NUMSAT].value; // count
+                    fields[NUMSAT].available = false;
                 } else {
                     srxl2Frames.gps.numSats = 0XFF;
                 }
                 return true;
             }    
             break;
+        #endif
         case 2: //TELE_DEVICE_AIRSPEED
             if (fields[AIRSPEED].available) {
                 srxl2Frames.airspeed.identifier = TELE_DEVICE_AIRSPEED; //0X11
@@ -692,6 +697,7 @@ bool srxl2IsFrameDataAvailable(uint8_t frameIdx){
                 srxl2Frames.airspeed.reserve3 =  0;
                 srxl2Frames.airspeed.reserve4 =  0;
                 srxl2Frames.airspeed.reserve5 =  0;
+                fields[AIRSPEED].available = false;
                 return true;
             }    
             break;
@@ -702,30 +708,35 @@ bool srxl2IsFrameDataAvailable(uint8_t frameIdx){
                 if (fields[RPM].available) {
                     tempU16 = (uint16_t) fields[RPM].value * 6  ; //from Hz to 10 tour/min
                     srxl2Frames.esc.RPM = swapBinary(tempU16);
+                    fields[RPM].available = false; 
                 } else {
                     srxl2Frames.esc.RPM = 0XFFFF;
                 }
                 if (fields[MVOLT].available) {
                     tempU16 = (uint16_t) (int_round( fields[MVOLT].value ,  10));  // Volts, 0.01V increments
                     srxl2Frames.esc.voltsInput = swapBinary(tempU16);
+                    fields[MVOLT].available = false;
                 } else {
                     srxl2Frames.esc.voltsInput =  0XFFFF;
                 }    
                 if ((fields[TEMP1].available) && (fields[TEMP1].value > 0)) {
                     tempU16 =  (uint16_t) fields[TEMP1].value * 10; // from degree to 0.1 degree
                     srxl2Frames.esc.tempFET = swapBinary(tempU16);
+                    fields[TEMP1].available = false ;
                 } else {
                     srxl2Frames.esc.tempFET =  0XFFFF;
                 }
                if (fields[CURRENT].available) {
                     tempU16 = (uint16_t) (int_round( fields[CURRENT].value ,  10));  //// Instantaneous current, 0.01A (0-655.34A)		7FFF-> no data  
                     srxl2Frames.esc.currentMotor  = swapBinary(tempU16);
+                    fields[CURRENT].available = false ;
                 } else {
                     srxl2Frames.esc.currentMotor = 0xFFFF ; 
                 }
                 if ((fields[TEMP2].available) && (fields[TEMP2].value > 0)) {
                     tempU16 =    fields[TEMP2].value * 10; // from degree to 0.1 degree
                     srxl2Frames.esc.tempBEC = swapBinary(tempU16);
+                    fields[TEMP2].available = false;
                 } else {
                     srxl2Frames.esc.tempBEC =  0XFFFF;
                 }
@@ -750,7 +761,120 @@ bool srxl2IsFrameDataAvailable(uint8_t frameIdx){
 } STRU_TELE_ESC;
 */
 /*
-        case 4: //TELE_DEVICE_RX_MAH
+	uint16_t		altitudeLow;		 BCD, meters, format 3.1 (Low order of altitude)
+	uint32_t		latitude;			 BCD, format 4.4, Degrees * 100 + minutes, less than 100 degrees
+	uint32_t		longitude;			 BCD, format 4.4 , Degrees * 100 + minutes, flag indicates > 99 degrees
+	uint16_t		course;				 BCD, 3.1
+	uint8_t		HDOP;					 BCD, format 1.1
+	uint8_t		GPSflags;				 // see definitions below
+
+#define	GPS_INFO_FLAGS_IS_NORTH						(1 << GPS_INFO_FLAGS_IS_NORTH_BIT)
+#define	GPS_INFO_FLAGS_IS_EAST						(1 << GPS_INFO_FLAGS_IS_EAST_BIT)
+#define	GPS_INFO_FLAGS_LONGITUDE_GREATER_99			(1 << GPS_INFO_FLAGS_LONGITUDE_GREATER_99_BIT)
+#define	GPS_INFO_FLAGS_GPS_FIX_VALID				(1 << GPS_INFO_FLAGS_GPS_FIX_VALID_BIT)
+#define	GPS_INFO_FLAGS_GPS_DATA_RECEIVED			(1 << GPS_INFO_FLAGS_GPS_DATA_RECEIVED_BIT)
+#define	GPS_INFO_FLAGS_3D_FIX						(1 << GPS_INFO_FLAGS_3D_FIX_BIT)
+#define GPS_INFO_FLAGS_NEGATIVE_ALT					(1 << GPS_INFO_FLAGS_NEGATIVE_ALT_BIT)
+*/
+        #ifdef USE_GPS_BCD_INSTEAD_OF_BINARY
+        case 4: //TELE_DEVICE_GPS_LOC	(0x16)	 GPS Location Data (Eagle Tree)
+            uint8_t flags;
+            flags = 0;
+            gpsCoordinateDDDMMmmmm_t coordinate; // structure ot convert long and lat
+            if ((fields[NUMSAT].available) and (fields[NUMSAT].value > 100)) { // only when there is a 3d fix
+                srxl2Frames.gpsLoc.identifier = TELE_DEVICE_GPS_LOC; //0X16
+                srxl2Frames.gpsLoc.sID = 0; // Secondary ID
+                if (fields[ALTITUDE].available) {
+                    if (fields[ALTITUDE].value < 0) {
+                        flags |= GPS_INFO_FLAGS_NEGATIVE_ALT;
+                        // convert from cm to dm, then keep 4 last digits and then convert to bcd
+                        srxl2Frames.gpsLoc.altitudeLow = (dec2bcd((uint16_t) ((-fields[ALTITUDE].value/10)%10000)));    
+                    } else {
+                    srxl2Frames.gpsLoc.altitudeLow = (dec2bcd((uint16_t) ((fields[ALTITUDE].value/10)%10000)));
+                    }
+                } else {
+                    srxl2Frames.gpsLoc.altitudeLow = 0;
+                }
+                
+                // latitude
+                GPStoDDDMM_MMMM(fields[LATITUDE].value, &coordinate);  // fill coordinate with bcd 
+                srxl2Frames.gpsLoc.latitude  = ((dec2bcd(coordinate.dddmm) << 16) | dec2bcd(coordinate.mmmm));
+                if ( fields[LATITUDE].value > 0) flags |= GPS_INFO_FLAGS_IS_NORTH;   
+
+                // longitude
+                GPStoDDDMM_MMMM(fields[LONGITUDE].value, &coordinate);
+                srxl2Frames.gpsLoc.longitude = ((dec2bcd(coordinate.dddmm) << 16) | dec2bcd(coordinate.mmmm));
+                if ( fields[LONGITUDE].value > 0) flags |= GPS_INFO_FLAGS_IS_EAST;   
+                if (fields[LONGITUDE].value / GPS_DEGREES_DIVIDER > 99) flags |= GPS_INFO_FLAGS_LONGITUDE_GREATER_99;
+
+                 // Ground course
+                if (fields[HEADING].available) {
+                    tempU16 = (uint16_t) (int_round(fields[HEADING].value , 10)); // from 0.01 deg to 0.1 deg
+                    srxl2Frames.gpsLoc.course = (dec2bcd(tempU16));
+                } else {
+                    srxl2Frames.gpsLoc.course = 0;
+                }
+                
+                // HDOP
+                uint16_t hdop = fields[GPS_PDOP].value / 10;
+                hdop = (hdop > 99) ? 99 : hdop;
+                srxl2Frames.gpsLoc.HDOP = dec2bcd(hdop);
+                flags |= GPS_INFO_FLAGS_GPS_FIX_VALID |GPS_INFO_FLAGS_GPS_DATA_RECEIVED | GPS_INFO_FLAGS_3D_FIX;
+                srxl2Frames.gpsLoc.GPSflags = flags;
+                //printf("GPS LOC alt=%X lat=%X  long=%X  course=%X   Hdop=%X\n", srxl2Frames.gpsLoc.altitudeLow ,\
+                //    srxl2Frames.gpsLoc.latitude , srxl2Frames.gpsLoc.longitude , srxl2Frames.gpsLoc.course , srxl2Frames.gpsLoc.HDOP);
+                return true;
+            }    
+            break;
+
+/*
+	uint8_t		identifier;														// Source device = 0x17
+	uint8_t		sID;															// Secondary ID
+	uint16_t	speed;															// BCD, knots, format 3.1
+	uint32_t	UTC;															// BCD, format HH:MM:SS.S, format 6.1
+	uint8_t		numSats;														// BCD, 0-99
+	uint8_t		altitudeHigh;													// BCD, meters, format 2.0 (High order of altitude)
+*/
+        case 5: //TELE_DEVICE_GPS_STATS		(0x17)										// GPS Status (Eagle Tree)
+            if ((fields[NUMSAT].available) and (fields[NUMSAT].value > 100)) { // only when there is a 3d fix
+                srxl2Frames.gpsStats.identifier = TELE_DEVICE_GPS_STATS; //0X17
+                srxl2Frames.gpsStats.sID = 0; // Secondary ID
+
+                // Number of sats and altitude (high bits)
+                uint8_t numSat = fields[NUMSAT].value;
+                if (numSat > 100) numSat = numSat % 100;
+                srxl2Frames.gpsStats.numSats = dec2bcd( (uint16_t) numSat);
+                // high part of altitude
+                srxl2Frames.gpsStats.altitudeHigh = dec2bcd(fields[ALTITUDE].value / 100000);
+                 // Speed (knots)
+                uint16_t speedTmp = fields[GROUNDSPEED].value * 1944 / 1000;
+                srxl2Frames.gpsStats.speed = (speedTmp > 9999) ? (dec2bcd(9999)) : (dec2bcd(speedTmp));
+                //Time
+                if (fields[GPS_TIME].available){
+                    uint32_t hhmmss00;
+                    hhmmss00 = fields[GPS_TIME].value; // hhmmss00 with hh, mm, ss in binary
+                    uint32_t hh; uint32_t mm ; uint32_t ss ;
+                    hh = (uint32_t) dec2bcd( (hhmmss00 >> 24) &0XFF); 
+                    mm = (uint32_t) dec2bcd( (hhmmss00 >> 16) &0XFF);
+                    ss = (uint32_t) dec2bcd( (hhmmss00 >> 8) &0XFF);
+                    srxl2Frames.gpsStats.UTC = (hh<<24) | (mm<<16) | (ss<<8);   // hhmmss00 with hh, mm, ss in bcd
+                } else {
+                    srxl2Frames.gpsStats.UTC = 0; 
+                }
+                
+                //srxl2Frames.gpsStats.UTC = 0X12345600;
+                srxl2Frames.gpsStats.notUsed1 = 0XFFFF ;
+                srxl2Frames.gpsStats.notUsed2 = 0XFFFF ;
+                srxl2Frames.gpsStats.notUsed3 = 0XFFFF ; 
+                fields[NUMSAT].available = false;
+                return true;
+            }    
+            break;
+            #endif // end USE_GPS_BCD_INSTEAD_OF_BINARY
+/*
+        
+        
+        case 6: //TELE_DEVICE_RX_MAH
             if (fields[MVOLT].available || fields[CURRENT].available){
                 srxl2Frames.voltCurrentCap.identifier = TELE_DEVICE_RX_MAH ;  // 0X18
                 srxl2Frames.voltCurrentCap.sID = 0; // Secondary ID
@@ -818,7 +942,23 @@ void srxl2FillTXBuffer(uint8_t frameIdx){
         case 3: // TELE_DEVICE_ESC
             memcpy(&srxl2TxBuffer[4], &srxl2Frames.esc.identifier, 16);
             break;
-        case 4: //TELE_DEVICE_RX_MAH
+        case 4: // TELE_DEVICE_GPS_LOC
+            memcpy(&srxl2TxBuffer[4], &srxl2Frames.gpsLoc.identifier, 16);
+            //printf("srxl2 buffer LOC filled ");
+            //for (uint8_t i=0; i<22 ;i++ ){
+            //    printf(" %2X ", srxl2TxBuffer[i]);
+            //}
+            //printf("\n");
+            break;
+        case 5: // TELE_DEVICE_GPS_STATS
+            memcpy(&srxl2TxBuffer[4], &srxl2Frames.gpsStats.identifier, 16);
+            //printf("srxl2 buffer STATS filled ");
+            //for (uint8_t i=0; i<22 ;i++ ){
+            //    printf(" %2X ", srxl2TxBuffer[i]);
+            //}
+            //printf("\n");
+            break;
+        case 6: //TELE_DEVICE_RX_MAH                   // normally not used
             memcpy(&srxl2TxBuffer[4], &srxl2Frames.voltCurrentCap.identifier, 16);
             break;
         case 0XFF: //request new handshake (it is a dummy value I use)
@@ -906,3 +1046,33 @@ uint16_t srxl2CalculateCrc( uint8_t * buffer , uint8_t length) {
         }
     return crc; 
 }        
+
+
+// BCD conversion
+static uint32_t dec2bcd(uint16_t dec) {// convert an u16 to an U32 bcd
+    uint32_t result = 0;
+    uint8_t counter = 0;
+
+    while (dec) {
+        result |= (dec % 10) << counter * 4;
+        counter++;
+        dec /= 10;
+    }
+    return result;
+}
+
+// From Frsky implementation
+static void GPStoDDDMM_MMMM(int32_t gpsDeg7Dec, gpsCoordinateDDDMMmmmm_t *result) {
+    int32_t absGps, deg, min;
+    if (gpsDeg7Dec <0) {
+       absGps = -gpsDeg7Dec;
+    } else {
+        absGps = gpsDeg7Dec;
+    }
+    deg = absGps / GPS_DEGREES_DIVIDER;  // just the degree
+    absGps = (absGps - deg * GPS_DEGREES_DIVIDER) * 60;     // absgps = Minutes left * 10^7 
+    min = absGps / GPS_DEGREES_DIVIDER;                     // minutes left
+    result->dddmm = deg * 100 + min;   // deg*100 + min
+    result->mmmm = (absGps - min * GPS_DEGREES_DIVIDER) / 1000; // keep 4 decimals of min
+}
+

@@ -244,7 +244,7 @@ void processCmd(){
         printf("To get the current config, just press Enter; to save it in flash, send SAVE; to get list of commands send ""?""\n");
         printf("   Note: some changes require a reset to be applied (e.g. to unlock I2C bus)\n");
         isPrinting = false;
-        return; 
+        return;  
     }
     if (cmdBuffer[0] != 0x0){
         char * equalPos = strchr( (char*)cmdBuffer, '=');  // search position of '='
@@ -433,7 +433,6 @@ void processCmd(){
             queue_try_add(&qSendCmdToCore1 , &data);
             return; // retun here to avoid other messages
         }
-		  
     }
     
     // change for channels
@@ -648,8 +647,7 @@ void processCmd(){
 
         } else  {
             printf("Error : protocol must be S(Sport Frsky), F(Fbus Frsky), C(CRSF=ELRS), J(Jeti), E(jeti Exbus), H(Hott), M(Mpx), 2(Sbus2 Futaba), L(SRXL2 Spektrum) or I(Ibus/Flysky)\n");
-			printf("Error : protocol must be R(RadioLink), F(Spektrum Xbus), T(Hitec)\n");
-		}
+        }
     }
     
     
@@ -820,6 +818,7 @@ void processCmd(){
             updateConfig = true;
         }
     }
+
     // change for RGB led gpio
     if ( strcmp("RGB", pkey) == 0 ) { 
         ui = strtoul(pvalue, &ptr, 10);
@@ -833,6 +832,7 @@ void processCmd(){
             updateConfig = true;
         }
     }
+    
     // change led color
     if ( strcmp("LED", pkey) == 0 ) {
         if (strcmp("N", pvalue) == 0) {
@@ -1155,6 +1155,7 @@ void processCmd(){
             }
         }  
     }
+
     /*
     // get steps for Sequencer
     if ( strcmp("STEP", pkey) == 0 ) { 
@@ -1171,7 +1172,8 @@ void processCmd(){
             return;
         }
     }
-    */   
+    */
+    
     // save the config
     if ( strcmp("SAVE", pkey) == 0 ) { 
         saveConfig();
@@ -1346,10 +1348,12 @@ void checkConfigAndSequencers(){     // set configIsValid
         printf("Error in parameters: When gpio is defined for ESC, gpio for Volt1 (V1) must be undefined (=255)\n");
         configIsValid=false;
     }    
-    if ( (config.pinEsc != 255) && (config.pinVolt[1]!=255)) {
-        printf("Error in parameters: When gpio is defined for ESC, gpio for current = Volt2 (V2) must be undefined (=255)\n");
-        configIsValid=false;
-    }    
+    
+    //if ( (config.pinEsc != 255) && (config.pinVolt[1]!=255)) {
+    //    printf("Error in parameters: When gpio is defined for ESC, gpio for current = Volt2 (V2) must be undefined (=255)\n");
+    //    configIsValid=false;
+    //}
+        
     if ( (config.pinEsc != 255) && (config.pinRpm!=255)) {
         printf("Error in parameters: When gpio is defined for ESC, gpio for RPM must be undefined (=255)\n");
         configIsValid=false;
@@ -1453,7 +1457,10 @@ void checkConfigAndSequencers(){     // set configIsValid
     printf("Press ? + Enter to get help about the commands\n");
 }
 
-void printConfigAndSequencers(){// print all and perform checks
+
+
+
+void printConfigAndSequencers(){   // print all and perform checks
     //startTimerUs(0) ;  // to debug only - to know how long it takes to print the config
     isPrinting = true;
     uint8_t version[] =   VERSION ;
@@ -1544,7 +1551,7 @@ void printConfigAndSequencers(){// print all and perform checks
     printf("Logger baudrate = %" PRIu32 "\n", config.loggerBaudrate)  ;
     printf("PWM is generated at = %i Hz\n", (int) config.pwmHz)  ;
     
-    printf("\nVoltage parameters:\n")  ;
+    printf("Voltage parameters:\n")  ;
     printf("    Scales : %f , %f , %f , %f \n", config.scaleVolt1 , config.scaleVolt2 ,config.scaleVolt3 ,config.scaleVolt4 )  ;
     printf("    Offsets: %f , %f , %f , %f \n", config.offset1 , config.offset2 ,config.offset3 ,config.offset4 )  ;
     if ( config.pinVolt[2] !=255 && config.temperature == 1) {
@@ -1765,6 +1772,7 @@ void setupConfig(){   // The config is uploaded at power on
     if (*flash_target_contents == CONFIG_VERSION ) {
         memcpy( &config , flash_target_contents, sizeof(config));
         if (config.pwmHz == 0XFFFF) config.pwmHz = _pwmHz; // set default value when it has not been defined manually
+
     } else {
         config.version = CONFIG_VERSION;
         config.pinChannels[0] = _pinChannels_1;

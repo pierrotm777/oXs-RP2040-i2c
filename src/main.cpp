@@ -60,10 +60,10 @@
 //         test tlm data in log interface
 //         it seems that in ELRS protocol, PWM are not generated since some version.
 //         use Rc channels with gyro correction to the signal Sbus out. 
-//         check if the gyro rate of mpu is the same as the one used in flightstab
+																				  
 //         in mpu, when we apply offsets for acc and gyro, we should check that we do not exceed the 16 bits (or put the values in 32 bits)
-//         avoid gyro calibration at reset after a watchdog reset (to reduce start up time); not sure it is critical.
-//         add some check during the calibration that the model is not moving
+																													 
+																			 
 
 
 // Look at file in folder "doc" for more details
@@ -168,6 +168,7 @@ int16_t gyroY;
 int16_t gyroZ;
 
 extern bool calibrateImuGyro ; // recalibrate the gyro or not at reset (avoid it after a watchdog reset)
+
 void setupI2c(){
     if ( config.pinScl == 255 || config.pinSda == 255) return; // skip if pins are not defined
     // send 10 SCL clock to force sensor to release sda
@@ -362,7 +363,6 @@ void setup() {
   //bool clockChanged; 
   //clockChanged = set_sys_clock_khz(133000, false);
   set_sys_clock_khz(133000, false);
-
   #ifdef DEBUG
   uint16_t counter = 10;                      // after an upload, watchdog_cause_reboot is true.
   //if ( watchdog_caused_reboot() ) counter = 0; // avoid the UDC wait time when reboot is caused by the watchdog   
