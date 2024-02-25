@@ -10,6 +10,7 @@ This project can be interfaced with 1 or 2 ELRS, FRSKY , HOTT , MPX, FLYSKY , Fu
 - PWM signals to stabilize a camera on pitch and roll
 - different sequences of PWM signals (to control Servo or to generate an analog/digital voltage) based on Rc channel values
 - data's (telemetry and/or PWM Rc channels) to be logged on a SD card
+- localisation data's on a second Rf link in order to retrieve a lost model (= locator)
 ### For telemetry, it can provide
    - up to 4 analog voltages measurement (with scaling and offset) (optional); one voltage is normally used to measure a current and 1 or 2 (optionnaly) for temperature
    - one RPM measurement; a scaling (rpmMultiplicator) can be used to take care e.g. of number of blades (optional)
@@ -18,7 +19,7 @@ This project can be interfaced with 1 or 2 ELRS, FRSKY , HOTT , MPX, FLYSKY , Fu
    - compensated vertical speed when connected to a baro + a differentil pressure sensor 
    - Pitch/Roll and accelerations X/Y/Z when conncted to a MP6050 sensor (optional); 
    - GPS data (longitude, latitude, speed, altitude,...) (optional)
-   - rpm/volt/temp/current/consumption from some ESC (Hobbywing4, ZTW mantis, Kontronix)
+   - rpm/volt/temp/current/consumption from some ESC (Hobbywing4, ZTW mantis, Kontronix, BlHeli)
    Note: vertical speed is improved when baro sensor is combined with MP6050 sensor.
    
 ### It can also provide up to 16 PWM RC channels to drive servos from a CRSF/ELRS or from 1 or 2 Sbus/Fbus/Exbus/Ibus/SRXL2 signal (e.g Frsky,Jeti,Flysky,Spektrum). The refresh rate can be set between 50Hz(default) and 333Hz.
@@ -45,7 +46,9 @@ This project can be interfaced with 1 or 2 ELRS, FRSKY , HOTT , MPX, FLYSKY , Fu
 ### It can log data's on a SD card. This require to build also another module with another RP2040: see oXs_logger project
 
 
-Each function (telemetry/PWM/SBUS/gyro/logger/sequencer) can be used alone or combined with the others.
+### It can transmit some localisation data on a separate rf link to another module in order to retrieve a model that has been lost.
+
+Each function (telemetry/PWM/SBUS/gyro/logger/sequencer/localisation) can be used alone or combined with the others.
 
 
 Note: when a mpu6050 is used (to improve vario reactivity, stabilize the plane and/or a camera), it is important to calibrate the mp6050 horizontally and vertically (see section below)
@@ -61,7 +64,7 @@ A better alternative is the RP2040-Zero or the RP2040-TINY (both have the same p
 
 This board can be connected to:
    * a pressure sensor (GY63 or GY86 board based on MS5611, SPL06 or BMP280) to get altitude and vertical speed
-   * a MS4525D0_A or a SDP3X (x=1,2,3) or SDP8xx differential pressure sensor to get airspeed (and compensated vertical speed)
+   * a MS4525D0_A or a SDP3X (x=1,2,3) or SDP8xx  or XGZP6897D differential pressure sensor to get airspeed (and compensated vertical speed)
    * a MP6050 (acc+gyro e.g. GY86) to improve reaction time of the vario or to get pitch/roll
    * 1 or 2 ADS1115 if you want to measure more than 4 analog voltages
    * a GPS from UBlox (like the beitian bn220) or one that support CASIC messages   
@@ -75,7 +78,9 @@ This board can be connected to:
    * some voltage dividers (=2 resistors) when the voltages to measure exceed 3V  
       note : a voltage can be used to measure e.g. a current (Volt2) or a temperature (Volt3/4) when some external devices are used to generate an analog voltage
    * a RPM sensor
-   * an ESC from Hobbywing (using V4 telemetry protocol), from ZTW mantis or from Kontronik. Those ESC provide one voltage, one current (+ current consumption) + RPM + 2 temperatures.    
+   * an ESC from Hobbywing (using V4 telemetry protocol), from ZTW mantis, from Kontronik or from BlHeli. Those ESC provide one voltage, one current (+ current consumption) + RPM + 1 or 2 temperatures.
+   * another rp2040 with an SD card to log huge volume of data's
+   * a LORA module SX1276/RFM95 to transmit the localisation on a long range rf link (see locator section)   
 
 About the SDP31, SDP32, SDP33 , SDP810:
      Those sensors are probably better than MS4525. They do not requires calibration (and reset) and are more accurate at low speed.
@@ -142,31 +147,36 @@ When a GPS is used:
 *  Connect the TX pin from GPS to the TX pin selected in parameter for RP2040
 *  So take care that wires TX and RX are not crossed (as usual in Serial connection)  
 
-When a Hobbywing, ZWT or Kontronik ESC is used:
+When a Hobbywing, ZWT, Kontronik or BlHeli ESC is used:
  * Connect the serial pin from ESC to the pin selected in parameter for RP2040 (for ESC_PIN)
  * Connect GND from ESC to RP2040 GND
  * do not define gpio's in RP2040 parameters for V1, V2, RPM and let TEMP parameter on 0. You can use V3 and V4 if you want. Note: SCALE1, SCALE2, OFFSET2 and RPM_MULT have to be defined based on your ESC and your motor.
 
-About sequencers, see below.
+About sequencers and locator, see below.
 
 The affectation of the pins has to be defined by the user.  
 Here are the command codes and the pins that can be used are:  
-Note: pin 16 is reserved for an internal LED on RP2040-zero or RP2040-TINY and so should not be used.  
+Note: pin 16 is reserved for an internal LED on RP2040-zero or RP2040-TINY and so should not be used with this board.  
 |Command|used for:|
 |----|----|
 |C1 = 0/15  ... C16 = 0/15|PWM output|
 |GPS_TX = 0/29            |getting GPS data |
-|GPS_RX = 0/29            |configuring GPS|
+|GPS_RX = 0/29            |sending configuration to GPS|
 |PRI = 5 ,9, 21 ,25       |primary RC channel input|  
 |SEC = 1, 13 , 17 ,29     |secondary RC channel input|  
 |SBUS_OUT = 0/29           |Sbus output|  
 |TLM = 0/29                |telemetry data (! for futaba Sbus2, this pin must be equal to PRI pin - 1)|  
-|V1= 26/29 ... V4 = 26/29 |voltage measurements|  
+|V1= 26/29 ... V4= 26/29 |voltage (or current/temperatue) measurements |  
 |SDA = 2, 6, 10, 14, 18, 22, 26 | I2C devices (baro, airspeed, MP6050, ADS115, ...)|  
 |SCL = 3, 7, 11, 15, 19, 23, 27 | I2C devices (baro, airspeed, MP6050, ADS115, ...)|
 |RPM = 0/29                     | RPM|
 |LED = 16                       | internal led of RP2040-zero or RP2040-TINY|  
 |LOG = 0/29                     | data to be logged |  
+|ESC_PIN = 0/29                 | data provided by ESC (rpm, volt, current, temp)|
+|SPI_CS  = 0/29                 | Chip Select pin from RMF95 (locator)|
+|SPI_SCK = 10, 14, 26           | SCK pin from RFM95 (locator)|
+|SPI_MOSI = 11, 15, 27          | MOSI pin from RFM95 (locator)|
+|SPI_MISO = 8, 12, 24, 28       | MISO pin from RFM95 (locator)| 
 
 
 ## --------- Software -------------------
@@ -181,7 +191,7 @@ If you just want to use it, there is (in most cases) no need to install/use any 
 * copy and paste (or drag and drop) the oXs.uf2 file to this new drive
 * the file should be automatically picked up by the RP2040 bootloader and flashed
 * the RPI_RP2 drive should disapear from the PC and the PC shoud now have a new serial port (COMx on windows)
-* you can now use a serial terminal (like putty , the one from arduino IDE, ...) and set it up for 115200 baud 8N1
+* you can now use a serial terminal (like putty , the one from arduino IDE, ...) and set it up for 115200 baud 8N1. Set it up in order to let it send automatically CR/LF when you press ENTER.
 * while the RP2040 is connected to the pc with the USB cable, connect this serial terminal to the serial port from the RP2040
 * when the RP2040 start (or pressing the reset button), press Enter and it will display the current configuration.
 * to list all the commands, send ?.
@@ -219,7 +229,7 @@ You have to compile your self the firmware if you want to change some values in 
 * assign another sequence number and/of generate alarms for some telemetry fields in Multiplex protocol
 * change the I2C address of some I2C sensors
 * use other default paramaters in order to avoid using commands via the USB/serial monitor. 
-
+* change the sensitivity of the XGZP sensor (if defferent from XGZP6897D001KPDPN)
 
 ## ------------ Failsafe---------------
 * For ELRS protocol, oXs does not received any RC channels data from the receiver(s) when RF connection is lost. If oXs is connected to 2 receivers (via PRI and SEC), oXs will generate PWM and Sbus signals on the last received data. If oXs does not get any data anymore from receiver(s), it will still continue to generate PWM and/or SBUS signals based on the failsafe setup stored inside oXs.
@@ -400,6 +410,61 @@ For more details, please read carrefully the file "gyro concepts.md" in the fold
 
 
 Important note: at this stage, this is still experimental. It has not been intensively tested. So used it at you own risk.
+
+
+## ------------------ Model Locator ----------------------------------------
+oXs can be used to locate a lost model (if you add a LORA module).
+ 
+The model is normally connected to the handset but when the model is on the ground, the range is quite limitted. 
+So if a model is lost at more than a few hundreed meters, the handset will not get any telemetry data anymore. 
+oXs allows to use a separate connection (with LORA modules) in order to have an extended range and have a chance to find back a lost model.
+This is possible because those modules use a lower frequency, a lower transmitting speed and a special protocol for long range.
+The LORA modules are SX1276/RFM95 that are sall and easily available (e.g. Aliexpress, ebay, amazon)
+\
+\
+The principle is the following:
+* You have to build 2 devices: 
+    * an oXs device with the sensors you want (ideally a GPS and optionally e.g. vario, voltages, current, ...) and a SX1276/RFM95 module
+    * a "locator receiver" device with:
+        * an Arduino pro_mini running at 8 mHz 3.3V
+        * a second SX1276/RFM95 module
+        * a display 0.96 pouces OLED 128X64 I2C SSD1306. It is small and is available for about 2€.;
+
+* Normally:
+    * the locator receiver is not in use.
+    * oXs is installed in the model and transmits the sensor data's over the normal RC Rx/Tx link. The SX1276 module in oXs is in listening mode (it does not tranmit) 
+* When a model is lost:
+    * the locator receiver" is powered on. It starts sending requests to oXs.    
+    * When the SX1276/RFM95 module in oXs receives a request, it replies with a small message containing the GPS coordinates and some data over the quality of the request signal.
+    * the display on the locator receiver shows those data's as wel as the quality of the signal received and the time enlapsed since the last received message.
+
+
+Note: the range of communication between two SX1276 modules is normally several time bigger then the common RC 2.4G link.   
+If oXs and locator receiver are both on the ground, it can be that there are to far away to communicate with each other.
+But there are 2 ways to extend the range:
+* use a directional antena on the locator receiver. The advantage of this solution is that, if you get a communication, you can use the system as a goniometer (looking at the quality of the signal) to know the direction of the lost model. This even works if you have no GPS connected to oXs. The drawback is that a directional antenna is not as small as a simple wire.
+* put the locator receiver (which is still a small device) on another model and fly over expected lost aera. In this case, the range can be more than 10 km and the chance is very high that a communication can be achieved between the 2 modules. Even if the communication is broken when the model used for searching goes back on the ground, you will know the location of the lost model because the display will still display the last received GPS coordinates.
+
+
+
+
+An oXs device with a SX1276/RFM95 does not perturb the 2.4G link and consumes only a few milliAmp because it remains normally in listening mode and when sending it is just a few % of the time. So, in order to increase the reliability of the system, it is possible to power oXs with a separate 1S lipo battery of e.g. 200/500 mAh. This should allow the system to work for several hours.
+
+
+Cabling : The SX1276/RFM95 module must be connected to the Rp2040 in the following way
+* rp2040 SPI_CS    <=> NSS from module
+* rp2040 SPI_MOSI  <=> MOSI from module
+* rp2040 SPI_MISO  <=> MISO from module
+* rp2040 SPI_SCK   <=> SCK from module
+* rp2040 GRND      <=> GRND from module
+* external (or rp2040 ) 3.3V   <=> 3.3V from module (!!! module does not support 5 Volt).
+
+
+To be checked : perhaps you have to use an additional voltage regulator (cost less than 1€) to get the 3.3 V, because it is not sure that the rp2040 voltage regulator can provide enough current when module is transmitting (for just a small time)  
+
+
+To build the locator receiver, please check and use the project openXsensor for Arduino (on github) 
+
 
 ## ------------------ Led -------------------
 When a RP2040-Zero or RP2040-TINY is used, the firmware will handle a RGB led (internally connected to gpio16).

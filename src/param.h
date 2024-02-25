@@ -72,6 +72,11 @@ struct CONFIG{
     bool gyroAutolevel;           // true means that stabilize mode replies the Hold mode (on switch position)
     uint8_t mpuOrientationH;       // define the orientation of the mpu when plane is horizontal;
     uint8_t mpuOrientationV;       // define the orientation of the mpu when plane is vertical (nose up);
+    // for Lora locator
+    uint8_t pinSpiCs;
+    uint8_t pinSpiSck;
+    uint8_t pinSpiMosi;
+    uint8_t pinSpiMiso;
 };
 
 void handleUSBCmd(void);
@@ -101,7 +106,7 @@ enum SEQ_OUTPUT_TYPE : uint8_t {
 };
 
 
-struct SEQ_DEF {
+struct SEQ_DEF {             // one set of parameters per sequencer
     uint8_t pin {}; // pin
     SEQ_OUTPUT_TYPE type {}; // type 0= SERVO or 1 = ANALOG
     uint32_t clockMs {};  // unit in msec
@@ -117,12 +122,14 @@ struct SEQ_DEF {
 //};
 
 enum CH_RANGE : int8_t {
-    m100=-100, m90=-90, m80=-80, m70=-70, m60=-60, m50 = -50, m40=-40, m30=-30, m20=-20, m10=-10, m0 = 0,
-    p0=0, p10=10 , p20=20 , p30=30 , p40=40 , p50=50, p60=60 , p70=70 , p80=80 , p90=90 , p100=100 , dummy = 127
+    m100=-100, m95=-95, m90=-90, m85=-85 ,m80=-80, m75=-75, m70=-70, m65=-65, m60=-60, m55=-55, m50=-50,
+         m45=-45, m40=-40, m35=-35, m30=-30, m25=-25, m20=-20, m15=-15, m10=-10, m5=-5, m0 = 0,
+    p0=0, p5=5, p10=10, p15=15, p20=20, p25=25, p30=30, p35=35, p40=40, p45=45, p50=50, p55=55,
+     p60=60, p65=65, p70=70, p75=75, p80=80, p85=85, p90=90, p95=95, p100=100 , dummy = 127
 };
 
 
-struct SEQ_STEP {
+struct SEQ_STEP {           // one set of parameters per sequence and per step
     CH_RANGE chRange {}; // channel value (converted in range) to activate this seq
     uint8_t smooth {};
     int8_t value {} ;
@@ -141,7 +148,7 @@ struct SEQ_STEP {
 
 
 #define SEQUENCER_MAX_NUMBER_OF_STEPS 256 // to be modified
-struct SEQUENCER{
+struct SEQUENCER{            // one set of parameters for all sequencers (strored in "seq")
     uint8_t version = SEQUENCER_VERSION;
     uint8_t defsMax = 0;
     SEQ_DEF defs[16] ;
@@ -178,6 +185,7 @@ bool getPid(uint8_t mode);  // get all pid parameters for one mode; return true 
 #define HW3 3
 #define KONTRONIK 2
 #define ZTW1 1
+#define BLH 5
 
 #define REQUEST_HORIZONTAL_MPU_CALIB 0X01
 #define REQUEST_VERTICAL_MPU_CALIB 0X02

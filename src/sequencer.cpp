@@ -5,12 +5,14 @@
 #include "tools.h"
 #include "sbus_out_pwm.h"
 #include "param.h"
+#include "sport.h"
+#include "hardware/watchdog.h"
 
 #define NO_SEQ 0xFFFF  
 
 #define SBUS_AT_M100 172
 #define SBUS_AT_P100 1811
-#define SEQ_NUMBER_OF_INTERVALS 20
+#define SEQ_NUMBER_OF_INTERVALS 40
 //#define SEQ_SBUS_INTERVAL ( (SBUS_AT_P100 - SBUS_AT_M100) /SEQ_NUMBER_OF_INTERVALS )
 
 //float seqSbusInterval = (float) (SBUS_AT_P100 - SBUS_AT_M100) /SEQ_NUMBER_OF_INTERVALS ; // interval in Sbus value between 2 intervals
@@ -40,6 +42,8 @@ extern uint16_t rcChannelsUs[16];
 
 extern uint32_t lastRcChannels;
 
+extern field fields[NUMBER_MAX_IDX];  // list of all telemetry fields and parameters that can be measured (not only used by Sport)
+extern CONFIG config; 
 
 extern SEQUENCER seq;
 extern uint16_t pwmTop;
@@ -72,6 +76,14 @@ void sequencerLoop(){
     //     else (if channel value is the same or does not match) : continue what means
     //          if next action is reached, apply next action (depend on state, ...)          
     //          else do nothing
+    static uint32_t lastSeqTransmitMs = 0;
+    uint32_t value1 = 0;        
+    uint32_t value2 = 0;
+    uint32_t code = 0;
+    uint32_t mask = 0; 
+    uint8_t shift = 0;
+    int8_t lastOutput = 0;
+
     #ifdef DEBUG_SIMULATE_SEQ_RC_CHANNEL
     if (lastRcChannels == 0) lastRcChannels = 1; // force a dummy value to let sequencerLoop to run
     //static uint32_t lastSimuSeqMs = 0;
@@ -85,6 +97,7 @@ void sequencerLoop(){
     #endif    
     //if ( sequencerIsValid == false) return; // do nothing when there is no valid sequencer
     if ( ! lastRcChannels) return ;   // skip if we do not have last channels
+    if ( seq.defsMax == 0) return ;   // skip if no sequencer is defined
     currentSeqMillis =  millisRp(); 
     for (uint8_t seqIdx = 0; seqIdx < seq.defsMax ; seqIdx++){ //same process for each sequencer
         if (seqDatas[seqIdx].nextActionAtMs == 0){ // this is when we are just starting; so we have to apply default value            
@@ -122,6 +135,66 @@ void sequencerLoop(){
             }
         }    
     }
+    #ifdef USE_RESERVE3_FOR_SPORT_FEEDBACK_FOR_SEQUENCES
+    #define INTERVAL_BETWEEN_SEQUENCES_TRANSMIT 100 // in ms
+    if ( currentSeqMillis > (lastSeqTransmitMs + INTERVAL_BETWEEN_SEQUENCES_TRANSMIT)) {
+        lastSeqTransmitMs = currentSeqMillis;        
+        value1 = 0b111111111111111111111111; // set the value to be transmitted when no value
+        value2 = value1;
+        for (uint8_t i = 0; i < seq.defsMax; i++){ 
+            // for each sequencer, fill an array with a value 1 or 2 at the position of the gipo used by the sequencer
+            // when gpio is above 16, mask the upper bits because there are only 16 pwm outputs
+            code = 3 ;                      // value when PWM = 0
+            lastOutput =  seqDatas[i].lastOutputVal;
+            if (lastOutput < 0){
+                if (lastOutput <= -75) code = 0;  // -100/-75
+                else  if (lastOutput <= -40) code = 1; //-70/-40
+                else code = 2;                         //-35/-5
+            } else if (lastOutput >0) {
+                if (lastOutput <= 35) code = 4;        // 5/35  
+                else  if (lastOutput <= 70) code = 5;  //40/70
+                else  if (lastOutput <= 100) code = 6;  //75/100
+                else code = 7;                          //more than 100
+            } 
+            shift = ((7 - (seq.defs[i].pin & 0X07)) * 3);
+            code =  code <<  shift  ;
+            mask = ~((uint32_t) 0x00000007 << shift) ;  // set 3 bits to 0
+            if ((seq.defs[i].pin & 0X08) == 0) {
+                value1 &= mask ;  // set 3 bits to 0
+                value1 |= code;              // set the value
+            } else {
+                value2 &= mask ;  // set 3 bits to 0
+                value2 |= code;              // set the value
+            }
+            printf("i=%i lo=%i s=%i c=%i m=%i v1=%i v2=%i\n" , i, lastOutput , shift, code , mask , value1 , value2); 
+        }  // end for
+        fields[RESERVE3].value = (int32_t) value1;
+        fields[RESERVE3].available = true ;
+        fields[RESERVE4].value = (int32_t) value2;
+        fields[RESERVE4].available = true ;
+        
+        if ((fields[RESERVE3].onceAvailable == false) || (fields[RESERVE3].onceAvailable == false) ){
+            fields[RESERVE3].onceAvailable = true;
+            fields[RESERVE4].onceAvailable = true;
+            if ( (config.protocol == 'S') || (config.protocol == 'F') ) { 
+                calculateSportMaxBandwidth();
+            }
+        }
+//  just to debug
+/*
+        printf("value 0..7=%i ", (int32_t) value1 ) ;
+        for( uint8_t i = 0 ; i<8; i++) {
+            printf(" %i ", (int8_t) ((value1 >> (21- i*3)) & 0X07 )); // group of  bits
+        }
+        printf("  value 8..15=%i ", (int32_t) value2  ) ;
+        for( uint8_t i = 0 ; i<8; i++) {
+            printf(" %i ", (int8_t) ((value2 >> (21- i*3)) & 0X07 )); // group of  bits
+        }
+        
+        printf("\n");       
+*/
+    }
+    #endif
 }
 
 
@@ -138,13 +211,13 @@ void startNewStep(uint8_t sequencer , uint16_t stepIdx){ // start a new step
     seqDatas[sequencer].currentStepIdx = stepIdx;
     
     //printf("Start new step for sequencer %i at step %i\n",sequencer, stepIdx);
-    if (seq.steps[stepIdx].smooth == 0){ // When there is no smoothing delay, nextaction = currentSeqMillis + keep and stait = wait
+    if (seq.steps[stepIdx].smooth == 0){ // When there is no smoothing delay, nextaction = currentSeqMillis + keep and state = wait
         seqDatas[sequencer].state = WAITING;
         seqDatas[sequencer].nextActionAtMs = currentSeqMillis + (seq.defs[sequencer].clockMs * seq.steps[stepIdx].keep) ;
         if ( seq.steps[stepIdx].value != 127 ) {  // avoid to update PWM when new value == 127 (= stop at current position)
             seqDatas[sequencer].lastOutputVal = seq.steps[stepIdx].value;
         }     
-    } else {   // when there is a smooth parameter > 0, next action is 20 after current and state = SMOOTHING
+    } else {   // when there is a smooth parameter > 0, next action is 20 ms after current and state = SMOOTHING
         seqDatas[sequencer].state = SMOOTHING;
         //  lastOutputVal is not changed
         seqDatas[sequencer].smoothStartAtMs = currentSeqMillis ; 

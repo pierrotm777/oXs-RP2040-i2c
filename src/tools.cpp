@@ -8,6 +8,7 @@
 #include "sport.h"
 #include "ms4525.h"
 #include "sdp3x.h"
+#include "XGZP6897D.h"
 
 extern queue_t qSensorData; 
 extern field fields[];
@@ -149,11 +150,12 @@ uint32_t prevAirspeedAvailableMs;
 float smoothAirspeedCmS = 0;
 extern MS4525 ms4525;
 extern SDP3X sdp3x;
+extern XGZP  xgzp;
 extern float actualPressurePa;
 
 
 void calculateAirspeed(){
-    if (ms4525.airspeedInstalled == false && sdp3x.airspeedInstalled == false ) return; // skip if no sensor installed
+    if (ms4525.airspeedInstalled == false && sdp3x.airspeedInstalled == false  && xgzp.airspeedInstalled == false) return; // skip if no sensor installed
     uint32_t nowUs = microsRp(); 
     if ( ( nowUs - prevAirspeedCalculatedUs) < 20000 ) return; // skip if there is less than 20 msec
     prevAirspeedCalculatedUs = nowUs;
@@ -235,11 +237,19 @@ int32_t posFieldValues[] = {
     15151,      //  AIRSPEED,    cm/s
     167,         //     AIRSPEED_COMPENSATED_VSPEED,
     98,         //  SBUS_HOLD_COUNTER,
+    
     12,          //  SBUS_FAILSAFE_COUNTER,
     135791,       // GPS cumulative dist in m
     2468,         // ACC_X in 0.001G
     3579,         // ACC_Y
-    1478          // Acc_Z        
+    1478,          // Acc_Z
+
+    45678,
+    56789,
+    67800,
+    78901,
+    89012
+
 };
 
 int32_t negFieldValues[] = {    
@@ -283,11 +293,19 @@ int32_t negFieldValues[] = {
     0,      //  AIRSPEED,    cm/s
     -167,         //     AIRSPEED_COMPENSATED_VSPEED,      
     0,         //  SBUS_HOLD_COUNTER,
+    
     0,          //  SBUS_FAILSAFE_COUNTER,   
     0,           // cumulative GPS dist m
     -2468,         // ACC_X in 0.001G
     -3579,         // ACC_Y
-    -1478          // Acc_Z        
+    -1478,          // Acc_Z
+
+    -45678,
+    -56789,
+    -67800,
+    -78901,
+    -89012
+        
 };
 // fill all fields with dummy values (useful to test a protocol)
  void fillFields( uint8_t forcedFields){

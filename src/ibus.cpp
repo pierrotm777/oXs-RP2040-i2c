@@ -131,11 +131,19 @@ uint8_t ibusTypes[NUMBER_MAX_IDX] = {  // list of ibus type in the same sequence
       IBUS_SENSOR_TYPE_UNKNOWN,      //AIRSPEED,
       IBUS_SENSOR_TYPE_UNKNOWN,      //AIRSPEED_COMPENSATED_VSPEED,
       IBUS_SENSOR_TYPE_UNKNOWN,      //SBUS_HOLD_COUNTER,
+      
       IBUS_SENSOR_TYPE_UNKNOWN,      //SBUS_FAILSAFE_COUNTER,
       IBUS_SENSOR_TYPE_UNKNOWN,      // GPS CUMULATIVE DISTANCE,      
       IBUS_SENSOR_TYPE_UNKNOWN,      // ACC_X 
       IBUS_SENSOR_TYPE_UNKNOWN,      // ACC_Y
       IBUS_SENSOR_TYPE_UNKNOWN,      // ACC_Z
+
+      IBUS_SENSOR_TYPE_UNKNOWN,      //RESERVE3
+      IBUS_SENSOR_TYPE_UNKNOWN,      //RESERVE4
+      IBUS_SENSOR_TYPE_UNKNOWN,      //RESERVE5
+      IBUS_SENSOR_TYPE_UNKNOWN,      //RESERVE6
+      IBUS_SENSOR_TYPE_UNKNOWN,      //RESERVE7
+      
 };
 
 void setupIbus() {                                                 
@@ -233,7 +241,8 @@ void setupListIbusFieldsToReply() {  // fill an array with the list of fields (f
     if ( (( config.pinVolt[2] != 255)  && (config.temperature == 1 or  config.temperature == 2)) || config.pinEsc !=255 ) {
         addToIbus(TEMP1) ;
     } 
-    if ( (( config.pinVolt[3] != 255)  && (config.temperature == 2) )  || config.pinEsc !=255 ) {
+    if ( (( config.pinVolt[3] != 255)  && (config.temperature == 2) )  || \
+               ( (config.pinEsc !=255 ) && (config.escType != BLH) )  ) {
         addToIbus(TEMP2) ;
     } 
     // here we could add other voltage parameter (current, ...)

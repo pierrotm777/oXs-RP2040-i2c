@@ -20,29 +20,51 @@ extern CONFIG config;
 extern uint8_t debugTlm;
 extern field fields[];  // list of all telemetry fields that are measured
 uint32_t nowHitecMs=millisRp();
+uint32_t nowHitecUs=microsRp();
+int frame = 0;
+int reference1ms = 0;
+int temp1;
+int temp2;
 
-static sensor_hitec_t *sensor;
-uint8_t _displayBuffer;
+uint32_t startTimer = 0;
+
+uint8_t *packetsHitec[PACKETCOUNT] = {
+  (uint8_t *)&packet11,
+  (uint8_t *)&packet12,
+  (uint8_t *)&packet13,
+  (uint8_t *)&packet14,
+  (uint8_t *)&packet15,
+  (uint8_t *)&packet16,
+  (uint8_t *)&packet17,
+  (uint8_t *)&packet18
+};
 
 void setupHitec(){
  
     if ( config.pinPrimIn == 255 || config.pinTlm == 255 || config.protocol != 'T') return; // skip if pins are not defined and if protocol is not Hitec  
-    //sensor = malloc(sizeof(sensor_hitec_t));
-    *sensor = (sensor_hitec_t){{0}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}};
-      
-    i2c_init( i2c0, 100 * 1000);
-    gpio_set_function(config.pinPrimIn, GPIO_FUNC_I2C);
-	gpio_pull_up(config.pinPrimIn);
-    gpio_set_function(config.pinTlm, GPIO_FUNC_I2C);
-    gpio_pull_up(config.pinTlm);
-	
-    //i2c_slave_init(i2c0, HITEC_I2C_ADDRESS, &i2c_hitec_handler);
-    i2c_set_slave_mode(i2c0, true, HITEC_I2C_ADDRESS);
-    *I2C0_INTR_MASK = I2C_INTR_MASK_RD_REQ;
-    irq_set_exclusive_handler(I2C0_IRQ, runHitecRequest);
-    irq_set_enabled(I2C0_IRQ, true);    
-    free(sensor);//libère la mémoire après appel  de malloc.
-	
+
+    if(millisRp()-nowHitecMs>=2000)
+    {
+        printf("Hitec wait 2s for start:\n");
+        // setup of packets to be sent to optima
+        for (int iPacket = 0; iPacket < PACKETCOUNT; iPacket++)
+        {
+            memset(packetsHitec[iPacket], 0, 7);
+            packetsHitec[iPacket][0] = 0x11 + iPacket;
+            packetsHitec[iPacket][6] = 0x11 + iPacket;
+        }
+        packet11.header = 0xAF;
+        packet11.frametype = 0x2D;
+
+        i2c_init( i2c0, 400 * 1000);
+        gpio_set_function(config.pinPrimIn, GPIO_FUNC_I2C);
+        gpio_pull_up(config.pinPrimIn);
+        gpio_set_function(config.pinTlm, GPIO_FUNC_I2C);
+        gpio_pull_up(config.pinTlm);
+        
+        i2c_slave_init(i2c0, HITEC_I2C_ADDRESS, &i2c_hitec_handler);
+        //nowHitecMs=millisRp(); /* Restart the Chrono for the printf */
+    }
 }
 
 void i2c_hitec_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
@@ -64,8 +86,19 @@ void i2c_hitec_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 
 }
 
-void handleHitec()
+void handleHitec()// run into main.cpp
 {
+
+    // detects the ESC's tick timeout
+    // when it occurs, the pulse train must be restarted
+    if (startTimer && (microsRp() - startTimer > TIMEOUT_DATA))
+    {
+        frame = (frame >= FRAME_MAX) ? 0 : frame + 1;
+        startTimer = 0;
+
+    }
+
+
     // update all fields here
     if (fields[VSPEED].available)
     {
@@ -74,22 +107,22 @@ void handleHitec()
     }
     if (fields[RELATIVEALT].available)
     {
-        *sensor->frame_0x1B[HITEC_FRAME_0X1B_ALTU] = int_round(fields[RELATIVEALT].value ,100) ; // from cm to m
-        sensor->is_enabled_frame[HITEC_FRAME_0X1B] = true;
+        // *sensor->frame_0x1B[HITEC_FRAME_0X1B_ALTU] = int_round(fields[RELATIVEALT].value ,100) ; // from cm to m
+        // sensor->is_enabled_frame[HITEC_FRAME_0X1B] = true;
     }
 
     if (fields[NUMSAT].available)
     {
         if (fields[LATITUDE].available) 
         {
-            //streamData.gps_lat = fields[LATITUDE].value; // degree / 10,000,000
-            *sensor->frame_0x12[HITEC_FRAME_0X12_GPS_LAT] = fields[LATITUDE].value;
+            // //streamData.gps_lat = fields[LATITUDE].value; // degree / 10,000,000
+            // *sensor->frame_0x12[HITEC_FRAME_0X12_GPS_LAT] = fields[LATITUDE].value;
             
         }       
         if (fields[LONGITUDE].available) 
         {
-            //streamData.gps_lon = fields[LONGITUDE].value; // degree / 10,000,000
-            *sensor->frame_0x13[HITEC_FRAME_0X13_GPS_LON] = fields[LONGITUDE].value;
+            // //streamData.gps_lon = fields[LONGITUDE].value; // degree / 10,000,000
+            // *sensor->frame_0x13[HITEC_FRAME_0X13_GPS_LON] = fields[LONGITUDE].value;
         }
         if (fields[HEADING].available) // not used
         {
@@ -98,45 +131,45 @@ void handleHitec()
         if (fields[GROUNDSPEED].available) 
         {
             //streamData.gps_speed = fields[GROUNDSPEED].value; // m/s
-            *sensor->frame_0x14[HITEC_FRAME_0X14_GPS_SPD] = fields[GROUNDSPEED].value; // m/s
+            // *sensor->frame_0x14[HITEC_FRAME_0X14_GPS_SPD] = fields[GROUNDSPEED].value; // m/s
             
         }
         if (fields[NUMSAT].available) 
         {
-            //streamData.gps_sats = fields[NUMSAT].value;
-            *sensor->frame_0x17[HITEC_FRAME_0X17_SATS] = fields[NUMSAT].value;
+            // //streamData.gps_sats = fields[NUMSAT].value;
+            // *sensor->frame_0x17[HITEC_FRAME_0X17_SATS] = fields[NUMSAT].value;
         }
-        sensor->is_enabled_frame[HITEC_FRAME_0X17] = true;
-        sensor->is_enabled_frame[HITEC_FRAME_0X12] = true;
-        sensor->is_enabled_frame[HITEC_FRAME_0X13] = true;
-        sensor->is_enabled_frame[HITEC_FRAME_0X14] = true;
-        sensor->is_enabled_frame[HITEC_FRAME_0X16] = true;               
+        // sensor->is_enabled_frame[HITEC_FRAME_0X17] = true;
+        // sensor->is_enabled_frame[HITEC_FRAME_0X12] = true;
+        // sensor->is_enabled_frame[HITEC_FRAME_0X13] = true;
+        // sensor->is_enabled_frame[HITEC_FRAME_0X14] = true;
+        // sensor->is_enabled_frame[HITEC_FRAME_0X16] = true;               
     }
     if (fields[AIRSPEED].available) 
     {
         if (fields[AIRSPEED].value >= 0) 
         {
-            *sensor->frame_0x1A[HITEC_FRAME_0X1A_ASPD] = (uint16_t) int_round(fields[AIRSPEED].value * 36, 1000); //       from cm/sec to 1 km/h
-            sensor->is_enabled_frame[HITEC_FRAME_0X1A] = true;
+            // *sensor->frame_0x1A[HITEC_FRAME_0X1A_ASPD] = (uint16_t) int_round(fields[AIRSPEED].value * 36, 1000); //       from cm/sec to 1 km/h
+            // sensor->is_enabled_frame[HITEC_FRAME_0X1A] = true;
         }
     }
     // RPM not used
     if (fields[MVOLT].available) 
     {
         //streamData.battVoltage = int_round(fields[MVOLT].value , 100) ; // from mvolt to 0.1V
-        *sensor->frame_0x18[HITEC_FRAME_0X18_VOLT] = (uint16_t) (int_round( fields[MVOLT].value ,  10));  // Volts, 0.01V increments
-        sensor->is_enabled_frame[HITEC_FRAME_0X18] = true;
+        // *sensor->frame_0x18[HITEC_FRAME_0X18_VOLT] = (uint16_t) (int_round( fields[MVOLT].value ,  10));  // Volts, 0.01V increments
+        // sensor->is_enabled_frame[HITEC_FRAME_0X18] = true;
     }
     if (fields[CURRENT].available) 
     {
         //streamData.battVoltage = int_round(fields[MVOLT].value , 100) ; // from mvolt to 0.1V
-        *sensor->frame_0x18[HITEC_FRAME_0X18_AMP] = (uint16_t) (int_round( fields[CURRENT].value ,  10));  //// Instantaneous current, 0.01A (0-655.34A)		7FFF-> no data  
-        sensor->is_enabled_frame[HITEC_FRAME_0X18] = true;
+        // *sensor->frame_0x18[HITEC_FRAME_0X18_AMP] = (uint16_t) (int_round( fields[CURRENT].value ,  10));  //// Instantaneous current, 0.01A (0-655.34A)		7FFF-> no data  
+        // sensor->is_enabled_frame[HITEC_FRAME_0X18] = true;
     }
     if (fields[TEMP1].available) 
     {
-        *sensor->frame_0x17[HITEC_FRAME_0X17_TEMP3] = (uint16_t) fields[TEMP1].value * 10; // from degree to 0.1 degree
-        sensor->is_enabled_frame[HITEC_FRAME_0X17] = true;
+        // *sensor->frame_0x17[HITEC_FRAME_0X17_TEMP3] = (uint16_t) fields[TEMP1].value * 10; // from degree to 0.1 degree
+        // sensor->is_enabled_frame[HITEC_FRAME_0X17] = true;
     }
 
     if (fields[YAW].available) 
@@ -183,9 +216,19 @@ void handleHitec()
         }
     }    
  
+}
+
+void runHitecRequest()
+{
+    // Optima has requested a new data packet
+    static int iPacket = 0; 
+    //static char watchdog = 0;
+    i2c_write_raw_blocking(i2c0, packetsHitec[iPacket++], 7);
+    iPacket &= 7;
+    //i2c_write_blocking(i2c0, HITEC_I2C_ADDRESS, bufferHitec, 7, false);    
 }  
 
-
+/*
 void runHitecRequest()
 {
 
@@ -343,10 +386,10 @@ void runHitecRequest()
         }
         if (sensor->frame_0x18[HITEC_FRAME_0X18_AMP])
         {
-            /* value for stock transmitter (tbc) */
+            // value for stock transmitter (tbc) 
             valueU16 = (*sensor->frame_0x18[HITEC_FRAME_0X18_AMP] + 114.875) * 1.441;
 
-            /* value for opentx transmitter  */
+            // value for opentx transmitter  
             //valueU16 = round(*sensor->frame_0x18[HITEC_FRAME_0X18_AMP]);
             valueU16 = int_round(*sensor->frame_0x18[HITEC_FRAME_0X18_AMP],1);
 
@@ -410,3 +453,4 @@ void runHitecRequest()
     i2c_write_raw_blocking(i2c0, bufferHitec, 7);
     //i2c_write_blocking(i2c0, HITEC_I2C_ADDRESS, bufferHitec, 7, false);
 }
+*/

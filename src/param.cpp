@@ -8,6 +8,7 @@
 #include "BMP280.h"
 #include "ads1115.h"
 #include "ms4525.h"
+#include "xgzp6897D.h"
 #include "sdp3x.h"
 #include <string.h>
 #include <ctype.h>
@@ -52,10 +53,13 @@
 // When a pin is used twice, the config is not valid and a LED will blink Red 
 // to store the pins, variable will be pinChannels[16], pinGpsTx, pinGpsRx, pinPrimIn, pinSecIn, 
 //                                     pinSbusOut,pinTlm, pinVolt[4]  pinSda, pinScl,pinRpm, pinLed
+// Spi SCK = 10, 14, 26 (for spi1)
+// Spi Mosi= 11, 15, 27 (for spi1)
+// spi Miso = 8, 12, 24, 28 (for spi1)
 
-#include "rlink.h"
-#include "xbus.h"
-#include "hitec.h"		  
+#include "rlink.h" //Add PM
+#include "xbus.h" //Add PM
+#include "hitec.h" //Add PM		  
 
 #define CMD_BUFFER_LENTGH 3000
 uint8_t cmdBuffer[CMD_BUFFER_LENTGH];
@@ -95,6 +99,7 @@ extern BMP280 baro3 ;
 
 extern MS4525 ms4525;
 extern SDP3X  sdp3x;
+extern XGZP   xgzp;
 
 extern ADS1115 adc1 ;
 extern ADS1115 adc2 ;    
@@ -115,6 +120,9 @@ extern gyroMixer_t gyroMixer ; // contains the parameters provided by the learni
 extern int8_t orientationList[36][6];
 extern const char* mpuOrientationNames[8];
 extern bool orientationIsWrong; 
+
+extern bool locatorInstalled;
+
 
 void handleUSBCmd(void){
     int c;
@@ -168,24 +176,23 @@ void processCmd(){
 
         if ((config.protocol == 'R') || (config.protocol == 'X') || (config.protocol == 'T'))
         {
-            printf("    Primary channels input    PRI     = 0, 4, 8, 12 (for SDA0)\n");
+            printf("  Primary channels input    PRI     = 0, 4, 8, 12 (for SDA0)\n");
         }
         else
         {
-          printf("    Primary channels input    PRI     = 5, 9, 21, 25\n");  
+          printf("  Primary channels input    PRI     = 5, 9, 21, 25\n");  
         }
 
-        printf("    Secondary channels input  SEC     = 1, 13, 17, 29\n");
+        printf("  Secondary channels input  SEC     = 1, 13, 17, 29\n");
 
         if ((config.protocol == 'R') || (config.protocol == 'X') || (config.protocol == 'T'))
         {
-            printf("    Telemetry                 TLM     = 1, 5, 9, 13 (for SCL0)\n");
+            printf("  Telemetry                 TLM     = 1, 5, 9, 13 (for SCL0)\n");
         }
         else
         {
-            printf("    Telemetry                 TLM     = 0, 1, 2, ..., 29\n");
+            printf("  Telemetry                 TLM     = 0, 1, 2, ..., 29\n");
         }
-        printf("  Telemetry                 TLM     = 0, 1, 2, ..., 29\n");
         printf("  GPS Rx                    GPS_RX  = 0, 1, 2, ..., 29\n");
         printf("  GPS Tx                    GPS_TX  = 0, 1, 2, ..., 29\n");
         printf("  Sbus OUT                  SBUS_OUT= 0, 1, 2, ..., 29\n");
@@ -195,14 +202,20 @@ void processCmd(){
         printf("  PWM Channels 1, ..., 16   C1 / C16= 0, 1, 2, ..., 15\n");
         printf("  Voltage 1, ..., 4         V1 / V4 = 26, 27, 28, 29\n");
         printf("  RGB led                   RGB     = 0, 1, 2, ..., 29\n");
+        printf("  Camera                    PITCH, ROLL, PRATIO, RRATIO  = 1 to 16\n");
         printf("  Logger                    LOG     = 0, 1, 2, ..., 29\n");
         printf("  ESC                       ESC_PIN = 0, 1, 2, ..., 29\n");
-        
+        printf("  Lora  CS                  SPI_CS  = 0, 1, 2, ..., 29\n");
+        printf("        SCK                 SPI_SCK = 10, 14, 26\n");
+        printf("        MOSI                SPI_MOSI = 11, 15, 27\n");
+        printf("        MISO                SPI_MISO = 8, 12, 24, 28\n");
+
         printf("Rf protocol                 PROTOCOL= Y        Y is S(Sport Frsky), F(Fbus Frsky), C(CRSF/ELRS), H(Hott), M(Mpx)\n");
-        printf("                                               2(Sbus2 Futaba), J(Jeti), E(jeti Exbus), L (spektrum SRXL2) ,or I(IBus/Flysky)\n");
+        printf("                                               2(Sbus2 Futaba), J(Jeti), E(jeti Exbus), L (spektrum SRXL2) ,I(IBus/Flysky)\n");
+        printf("                                               and I2C protocols are R(RadioLink), X(spektrum Xbus) or T(Hitec)\n");
         printf("    CRSF baudrate:          CRSFBAUD = 420000\n");
                 
-        printf("Type of ESC :               ESC_TYPE = YYY      YYY is HW4 (Hobbywing V4) , ZTW1 (ZTW mantis) or KON (Kontronik)\n");
+        printf("Type of ESC :               ESC_TYPE = YYY      YYY is HW4(Hobbywing V4), ZTW1(ZTW mantis),KON (Kontronik) or BLH(BlHeli)\n");
         printf("Logger baudrate :           LOGBAUD = 115200\n");
         printf("Refresh rate of servos      PWMHZ = 50          Value in range 50...333 (apply for PWM and sequencer)\n");
         printf("Voltage scale x(1,2,3,4)    SCALEx = nnn.ddd    e.g. SCALE1=2.3 or SCALE3=0.123\n")  ;
@@ -890,19 +903,25 @@ void processCmd(){
     if ( strcmp("ESC_TYPE", pkey) == 0 ) { 
         if (strcmp("HW4", pvalue) == 0) {
             config.escType = HW4 ;
+            printf("escType is now HW4 (Hobbywing)\n");
             updateConfig = true; 
         //} else if  (strcmp("HW3", pvalue) == 0) {
         //    config.escType = HW3 ;
         //    updateConfig = true;
         } else if (strcmp("KON", pvalue) == 0) {
             config.escType = KONTRONIK ;
+            printf("escType is now KON (Kontronik)\n");
             updateConfig = true;
         } else if (strcmp("ZTW1", pvalue) == 0) {
             config.escType = ZTW1 ;
             printf("escType is now ZTW1\n");
             updateConfig = true;
+        } else if (strcmp("BLH", pvalue) == 0) {
+            config.escType = BLH ;
+            printf("escType is now BLH (BlHeli)\n");
+            updateConfig = true;
         } else {    
-            printf("Error : ESC_TYPE must be HW4 , ZTW1 or KON\n");
+            printf("Error : ESC_TYPE must be HW4, ZTW1, KON or BLH\n");
         }
     }
 
@@ -1138,6 +1157,65 @@ void processCmd(){
         }  
     }
 
+    // change for LORA SPI CS pin
+    if ( strcmp("SPI_CS", pkey) == 0 ) { 
+        ui = strtoul(pvalue, &ptr, 10);
+        if ( *ptr != 0x0){
+            printf("Error : pin must be an unsigned integer\n");
+        } else if ( !(ui <=29 or ui ==255)) {
+            printf("Error : pin must be in range 0/29 or 255\n");
+        } else {    
+            config.pinSpiCs = ui;
+            printf("Pin for SPI CS = %u\n" , config.pinSpiCs );
+            updateConfig = true;
+        }
+    }
+
+    // change for LORA SPI SCK pin (10, 14, 26)
+    if ( strcmp("SPI_SCK", pkey) == 0 ) { 
+        ui = strtoul(pvalue, &ptr, 10);
+        if ( *ptr != 0x0){
+            printf("Error : pin must be an unsigned integer\n");
+        } else if ( !(ui ==10 or ui ==14 or ui ==26 or ui ==255)) {
+            printf("Error : pin SPI_SCK must be 10,14,26 or 255\n");
+        } else {    
+            config.pinSpiSck = ui;
+            printf("Pin for SPI SCK = %u\n" , config.pinSpiSck );
+            updateConfig = true;
+        }
+    }
+
+    // change for LORA SPI MOSI pin (11, 15, 27)
+    if ( strcmp("SPI_MOSI", pkey) == 0 ) { 
+        ui = strtoul(pvalue, &ptr, 10);
+        if ( *ptr != 0x0){
+            printf("Error : pin must be an unsigned integer\n");
+        } else if ( !(ui ==11 or ui ==15 or ui ==27 or ui ==255)) {
+            printf("Error : pin SPI_MOSI must be 11, 15, 27 or 255\n");
+        } else {    
+            config.pinSpiMosi = ui;
+            printf("Pin for SPI MOSI = %u\n" , config.pinSpiMosi );
+            updateConfig = true;
+        }
+    }
+
+
+    // change for LORA SPI MISO pin (8, 12, 24, 28)
+    if ( strcmp("SPI_MISO", pkey) == 0 ) { 
+        ui = strtoul(pvalue, &ptr, 10);
+        if ( *ptr != 0x0){
+            printf("Error : pin must be an unsigned integer\n");
+        } else if ( !(ui ==8 or ui ==12 or ui ==24 or ui ==28 or ui ==255)) {
+            printf("Error : pin SPI_MISO must be 8, 12, 24, 28 or 255\n");
+        } else {    
+            config.pinSpiMiso = ui;
+            printf("Pin for SPI MISO = %u\n" , config.pinSpiMiso );
+            updateConfig = true;
+        }
+    }
+
+
+
     // get Sequencer definition
     if ( strcmp("SEQ", pkey) == 0 ) { 
         if (strcmp("DEL", pvalue) == 0) {
@@ -1250,6 +1328,10 @@ void checkConfigAndSequencers(){     // set configIsValid
     for (uint8_t i = 0 ; i<4 ; i++) {addPinToCount(config.pinVolt[i]);}
     addPinToCount(config.pinLogger);
     addPinToCount(config.pinEsc);
+    addPinToCount(config.pinSpiCs);
+    addPinToCount(config.pinSpiSck);
+    addPinToCount(config.pinSpiMosi);
+    addPinToCount(config.pinSpiMiso);
     for (uint8_t i = 0 ; i<seq.defsMax ; i++) {
         if (seq.defs[i].pin > 29 ) {
             printf("Error in sequencer: one pin number is %u : it must be <30", seq.defs[i].pin);
@@ -1344,26 +1426,27 @@ void checkConfigAndSequencers(){     // set configIsValid
         printf("Error in parameters: Logger baudrate must be in range 9600...1000000\n");
         configIsValid=false;
     }
-    if ( (config.pinEsc != 255) && (config.pinVolt[0]!=255) ) {
-        printf("Error in parameters: When gpio is defined for ESC, gpio for Volt1 (V1) must be undefined (=255)\n");
-        configIsValid=false;
-    }    
+    //if ( (config.pinEsc != 255) && (config.pinVolt[0]!=255) ) {
+    //    printf("Error in parameters: When gpio is defined for ESC, gpio for Volt1 (V1) must be undefined (=255)\n");
+    //    configIsValid=false;
+    //}    
     
     //if ( (config.pinEsc != 255) && (config.pinVolt[1]!=255)) {
     //    printf("Error in parameters: When gpio is defined for ESC, gpio for current = Volt2 (V2) must be undefined (=255)\n");
     //    configIsValid=false;
     //}
         
-    if ( (config.pinEsc != 255) && (config.pinRpm!=255)) {
-        printf("Error in parameters: When gpio is defined for ESC, gpio for RPM must be undefined (=255)\n");
-        configIsValid=false;
-    }
-    if ( (config.pinEsc != 255) && (config.temperature!=255) && (config.temperature!=0)) {
-        printf("Error in parameters: When gpio is defined for ESC, parameter about number of temperature (TEMP) must be 0 or 255\n");
-        configIsValid=false;
-    }    
-    if ( (config.pinEsc != 255) && (config.escType!=HW3) && (config.escType!=HW4) && (config.escType!=KONTRONIK) && (config.escType!=ZTW1)) {
-        printf("Error in parameters: When gpio is defined for ESC, esc type must be HW4, ZTW1 or KON\n");
+    //if ( (config.pinEsc != 255) && (config.pinRpm!=255)) {
+    //    printf("Error in parameters: When gpio is defined for ESC, gpio for RPM must be undefined (=255)\n");
+    //    configIsValid=false;
+    //}
+    //if ( (config.pinEsc != 255) && (config.temperature!=255) && (config.temperature!=0)) {
+    //    printf("Error in parameters: When gpio is defined for ESC, parameter about number of temperature (TEMP) must be 0 or 255\n");
+    //    configIsValid=false;
+    //}    
+    if ( (config.pinEsc != 255) && (config.escType!=HW3) && (config.escType!=HW4) && \
+            (config.escType!=KONTRONIK) && (config.escType!=ZTW1) && (config.escType!=BLH)) {
+        printf("Error in parameters: When gpio is defined for ESC, esc type must be HW4, ZTW1, KON or BLH\n");
         configIsValid=false;
     }    
     if ( (config.pwmHz < 50) || (config.pwmHz > 333)){
@@ -1372,6 +1455,7 @@ void checkConfigAndSequencers(){     // set configIsValid
     }    
     if ((config.gyroChanControl != 255) and ( config.gyroChan[0]==255 or config.gyroChan[1]==255 or config.gyroChan[2]==255)){
         printf("Error in parameters: when gyro mode/gain Rc channel is defined (not 255), Rc channels must also be defined for Roll, Pitch and Yaw).\n");
+        
         configIsValid=false;
     }
     if ((config.gyroChanControl != 255) and ( config.pinScl==255 or config.pinSda==255)){
@@ -1401,6 +1485,11 @@ void checkConfigAndSequencers(){     // set configIsValid
             printf("Error in parameters: gyro horizontal (%i) and vertical (%i) orientations are not compatible\n",config.mpuOrientationH,config.mpuOrientationV);
             orientationIsWrong= true;
         }
+    }
+    if ((config.pinSpiCs != 255) && (config.pinSpiSck==255 or config.pinSpiMosi==255 or config.pinSpiMiso==255)){
+																				
+        printf("Error in parameters: when SPI_CS is not 255, then SPI_CS, SPI_MOSI and SPI_MISO must all be defined (different from 255)\n");
+        configIsValid=false;    
     }
 /* Add I2C Protocols */
     if (config.protocol == 'R' && config.pinPrimIn == 255  ){/*Ajout RadioLink*/
@@ -1502,6 +1591,10 @@ void printConfigAndSequencers(){   // print all and perform checks
     printf("Camera  P,R,PR,RR         = %4u %4u %4u %4u (PITCH, ROLL, PRATIO, RRATIO  = 1 to 16)\n", config.CamPitchChannel , config.CamRollChannel, config.CamPitchRatio , config.CamRollRatio);
     printf("Logger  . . . . . . . . . = %4u  (LOG    = 0, 1, 2, ..., 29)\n", config.pinLogger );
     printf("ESC . . . . . . . . . . . = %4u  (ESC_PIN= 0, 1, 2, ..., 29)\n", config.pinEsc );
+    printf("Locator CS  . . . . . . . = %4u  (SPI_CS = 0, 1, 2, ..., 29)\n", config.pinSpiCs );
+    printf("        SCK . . . . . . . = %4u  (SPI_SCK= 10, 14, 26)\n", config.pinSpiSck );
+    printf("        MOSI  . . . . . . = %4u  (SPI_MOSI=11, 15, 27)\n", config.pinSpiMosi );
+    printf("        MISO  . . . . . . = %4u  (SPI_MISO=8, 12, 24, 28)\n", config.pinSpiMiso );
     
     if (config.escType == HW4) {
         printf("    Esc type is HW4 (Hobbywing V4)\n")  ;
@@ -1511,9 +1604,11 @@ void printConfigAndSequencers(){   // print all and perform checks
         printf("Esc type is KON (Kontronik)\n")  ;
     } else if (config.escType == ZTW1) {
         printf("Esc type is ZTW1 (ZTW mantis)\n")  ;
+    } else if (config.escType == BLH) {
+        printf("Esc type is BLH (BlHeli)\n")  ;
     } else {
         printf("Esc type is not defined\n")  ;
-    }
+    }    
 
     watchdog_update(); //sleep_ms(500);
     if (config.protocol == 'S'){
@@ -1535,7 +1630,7 @@ void printConfigAndSequencers(){   // print all and perform checks
         } else if (config.protocol == 'F'){
             printf("\nProtocol is Fbus(Frsky)\n")  ;    
         } else if (config.protocol == 'L'){
-            printf("\nProtocol is SRXL2 (Spektrum)\n")  ; 
+            printf("\nProtocol is SRXL2 (Spektrum)\n")  ;    
 /* Add I2C Protocols */
         } else if (config.protocol == 'R'){
             printf("\nProtocol is RadioLink (use PRI and TLM as I2C0 port)\n")  ; 
@@ -1581,6 +1676,8 @@ void printConfigAndSequencers(){   // print all and perform checks
         printf("Aispeed sensor is detected using MS4525\n")  ;        
     } else if (sdp3x.airspeedInstalled) {
         printf("Airspeed sensor is detected using SDP3X\n")  ;
+    } else if (xgzp.airspeedInstalled) {
+        printf("Airspeed sensor is detected using XGZP....\n")  ; 
     } else {
         printf("Airspeed sensor is not detected\n")  ;
     } 
@@ -1676,7 +1773,13 @@ void printConfigAndSequencers(){   // print all and perform checks
                                                         , (int) fmap( config.failsafeChannels.ch14 )\
                                                         , (int) fmap( config.failsafeChannels.ch15 ) );
     }    
-
+    if (config.pinSpiCs != 255){
+        if (locatorInstalled ){
+            printf("Lora module for locator is detected\n")  ;
+        } else {
+            printf("Lora module for locator is not detected\n")  ;   
+        }     
+    }
     if ( config.CamPitchChannel !=255 && config.CamRollChannel !=255 && config.CamPitchRatio !=255 && config.CamRollRatio !=255) {
 
     #if defined(GYRO_PITCH_CHANNEL) && defined(GYRO_ROLL_CHANNEL) && defined(GYRO_ROLL2_CHANNEL)
@@ -1722,6 +1825,7 @@ void saveConfig() {
     uint8_t buffer[FLASH_PAGE_SIZE] ;
     memset(buffer, 0xff, FLASH_PAGE_SIZE);
     memcpy(&buffer[0], &config, sizeof(config));
+    printf("size of config is %i\n", sizeof(config));
     // Note that a whole number of sectors must be erased at a time.
     // irq must be disable during flashing
     watchdog_enable(3000 , true);
@@ -1902,6 +2006,11 @@ void setupConfig(){   // The config is uploaded at power on
         config.pid_param_stab.kd[1] =  _pid_param_stab_KD_ELV;
         config.pid_param_stab.kd[2] =  _pid_param_stab_KD_RUD;
 
+        config.pinSpiCs = _pinSpiCs;
+        config.pinSpiSck = _pinSpiSck;
+        config.pinSpiMosi = _pinSpiMosi;
+        config.pinSpiMiso = _pinSpiMiso;
+
     }
             
 } 
@@ -2038,6 +2147,21 @@ void printFieldValues(){
                     break;
                 case ACC_Z :
                     printf("Acc Z = %fg\n", (float) fields[i].value * 0.001) ;
+                    break;
+                case RESERVE3:
+                    printf("Reserve 3 = %d\n", (int) fields[i].value) ;
+                    break;
+                case RESERVE4:
+                    printf("Reserve 4 = %d\n", (int) fields[i].value) ;
+                    break;
+                case RESERVE5:
+                    printf("Reserve 5 = %d\n", (int) fields[i].value) ;
+                    break;
+                case RESERVE6:
+                    printf("Reserve 6 = %d\n", (int) fields[i].value) ;
+                    break;
+                case RESERVE7:
+                    printf("Reserve 7 = %d\n", (int) fields[i].value) ;
                     break;
                             
             } // end switch
@@ -2290,7 +2414,8 @@ void saveSequencers() {
     //printConfig(); 
 }
 
-bool getAllSequencers(){  // try to get sequencer definition from a string pointed by pvalue; return true if valid (then seq structure is modified)
+bool getAllSequencers(){  // try to get sequencer definition from a string pointed by pvalue; return true if valid
+                          //  (then seq structure is modified)
                        // when true we still have to check if this is valid with config (for use of pins and with steps)
     seqIdx = 0;        // count the sequencer
     sequenceIdx = 0;  // count the sequence
@@ -2440,8 +2565,12 @@ bool parseOneSequence() { // parse one sequence and all steps from this sequence
         printf("Error: for sequence %i, Rc channel value must in range -100...100 (included)\n" , sequenceIdx+1);
         return false;    
     }
-    if (( tempIntTable[0] % 10) != 0){
-        printf("Error: for sequence %i, Rc channel value must be a multiple of 10 (10, 20, ...100, -10, -20,...-100\n" , sequenceIdx+1);
+    //int  modulo10 = tempIntTable[0] % 10;
+    //if (( modulo10 != 0) && ( modulo10 != 5) && ( modulo10 != -5) ) {
+        if ( (tempIntTable[0] % 5) != 0  ) {
+        printf("Error: for sequence %i, Rc channel value is % but must be a multiple of 5 (5,10,15,20,...100, -5,-10,-15,...-100)\n"
+         , sequenceIdx+1 , tempIntTable[0]);
+        //printf("wrong value is %i, modulo is %i\n", tempIntTable[0], tempIntTable[0] % 10);
         return false;    
     }
     tempIntTable[1] = 0; // set 4 optional flags to 0

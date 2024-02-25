@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/irq.h"
-
+//#include "pico/util/queue.h"
 #include "tools.h"
 #include "config.h"
 #include "param.h"
@@ -35,6 +35,8 @@ static uint32_t bcd32(float value, uint8_t precision);
 
 
 extern CONFIG config;
+//queue_t xbuxRxQueue ;
+
 // Globals
 double prevSpekVoltage = 0.0;
 // XBUS_UN_TELEMETRY TmBuffer = {IDENTIFIER, 0, 

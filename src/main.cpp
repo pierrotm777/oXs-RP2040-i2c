@@ -7,6 +7,7 @@
 #include "BMP280.h"
 #include "ms4525.h"
 #include "sdp3x.h"
+#include "XGZP6897D.h"
 #include "vario.h"
 #include "voltage.h"
 #include "gps.h"
@@ -47,6 +48,7 @@
 #include "logger.h"
 #include "esc.h"
 #include "gyro.h"
+#include "lora.h"
 
 // to do : add rpm, temp telemetry fields to jeti protocol
 //         try to detect MS5611 and other I2C testing the different I2C addresses
@@ -59,12 +61,10 @@
 //         test logger param in config parameters
 //         test tlm data in log interface
 //         it seems that in ELRS protocol, PWM are not generated since some version.
-//         use Rc channels with gyro correction to the signal Sbus out. 
-																				  
+//         use Rc channels with gyro correction to the signal Sbus out.
 //         in mpu, when we apply offsets for acc and gyro, we should check that we do not exceed the 16 bits (or put the values in 32 bits)
-																													 
-																			 
 
+//         Test Lora locator functionality that has been added.
 
 // Look at file in folder "doc" for more details
 //
@@ -113,6 +113,7 @@ ADS1115 adc2( I2C_ADS_Add2 , 1) ;     // class to handle second ads1115 (adr pin
 
 MS4525 ms4525 ( (uint8_t) MS4525_ADDRESS ) ; // 0x28 is the default I2C adress of a 4525DO sensor)
 SDP3X sdp3x( (uint8_t) SDPXX_ADDRESS) ;      // 0X21 is the default I2C address of asdp31,... sensor (diffrent for sdp8xx)
+XGZP  xgzp( (uint8_t) XGZP_ADDRESS );        // 0x6D is the only one I2C adress
 
 VARIO vario1;
 
@@ -242,6 +243,9 @@ void setupSensors(){     // this runs on core1!!!!!!!!
       ms4525.begin();
       if (! ms4525.airspeedInstalled) {
         sdp3x.begin();
+        if (! sdp3x.airspeedInstalled) {
+            xgzp.begin();
+        }
       }
       #ifdef USEDS18B20
       ds18b20Setup(); 
@@ -284,7 +288,14 @@ void getSensors(void){      // this runs on core1 !!!!!!!!!!!!
     sdp3x.getDifPressure();
     calculateAirspeed( );
     vario1.calculateVspeedDte();
-  } 
+  }
+  if (xgzp.airspeedInstalled){
+    xgzp.getDifPressure();
+    calculateAirspeed( );
+    vario1.calculateVspeedDte();
+  }
+  
+
   readRpm();
   handleEsc();
   #ifdef USE_DS18B20
@@ -292,8 +303,8 @@ void getSensors(void){      // this runs on core1 !!!!!!!!!!!!
   #endif
 }
 
-void mergeSeveralSensors(void){
-}
+//void mergeSeveralSensors(void){
+//}
 
 void setColorState(){    // set the colors based on the RF link
     lastBlinkMillis = millisRp(); // reset the timestamp for blinking
@@ -391,7 +402,6 @@ void setup() {
   checkConfigAndSequencers();     // check if config and sequencers are valid (print error message; configIsValid is set on true or false)
   setupLed();
   setRgbColorOn(0,0,10);  // switch to blue during the setup of different sensors/pio/uart
-  
   if (configIsValid) { // continue with setup only if config is valid 
       for (uint8_t i = 0 ;  i< NUMBER_MAX_IDX ; i++){ // initialise the list of fields being used 
         fields[i].value= 0;
@@ -476,6 +486,10 @@ void setup() {
   } 
   printConfigAndSequencers(); 
   setRgbColorOn(10,0,0); // set color on red (= no signal)
+  // to detect end of setup
+  //printf("end of set up\n");
+  //while (1) {watchdog_update();};
+
   /*
   if (clockChanged){
     printf("clock is changed to 133mHz\n");
@@ -570,7 +584,7 @@ void loop() {
 
   if ((configIsValid) and (configIsSaved)) {
       getSensorsFromCore1(); // this also generate the LOG signal on pio UART
-      mergeSeveralSensors();
+      //mergeSeveralSensors();
       watchdog_update();
       if ( config.protocol == 'C'){   //elrs/crsf
         fillCRSFFrame();
@@ -675,7 +689,9 @@ void loop() {
   //} 
   //enlapsedTime(0);
   //printf("end of loop\n");sleep_ms(100); 
-  
+  if (config.pinSpiCs != 255) {
+    loraHandle() ;
+  }  
 }
 
 // initialisation of core 1 that capture the sensor data

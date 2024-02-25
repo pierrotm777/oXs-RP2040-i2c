@@ -1,7 +1,7 @@
 
 cmake_minimum_required(VERSION 3.13)
 
-add_compile_definitions(PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64)
+add_compile_definitions(PICO_XOSC_STARTUP_DELAY_MULTIPLIER=128)
 
 # initialize the SDK based on PICO_SDK_PATH
 # note: this must happen before project()
@@ -46,6 +46,7 @@ target_link_libraries(oXs PRIVATE
         hardware_irq
         hardware_adc
         hardware_pwm
+        hardware_spi
         )
 
 #enable printf on usb

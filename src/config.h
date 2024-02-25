@@ -1,7 +1,7 @@
 #pragma once
 
 #include <stdint.h>
-#define VERSION "2.11.1 & I2C"
+#define VERSION "2.11.44 & I2C"
 
 //#define DEBUG  // force the MCU to wait for some time for the USB connection; still continue if not connected
 
@@ -79,6 +79,11 @@
 #define P_ACC_X                80
 #define P_ACC_Y                80
 #define P_ACC_Z                80
+#define P_RESERVE3            200
+#define P_RESERVE4            200
+#define P_RESERVE5            200
+#define P_RESERVE6            200
+#define P_RESERVE7            200
 
 
 // -------------- for ELRS protocol  ------------------------------
@@ -154,12 +159,24 @@
 #define FROM_SBUS_MAX 1811  // This is equivalent to +100 on openTx
 #define TO_PWM_MAX 2012     // this is the PWM usec for +100
 
+//#define EXTENDED_RANGE_FROM_CHANNEL 2  // (range 1/16) ; uncoment those 2 lines if you want extended PWM usec range for some (a range) servos
+//#define EXTENDED_RANGE_UP_TO_CHANNEL 6 // (range 1/16) ;uncoment those 2 lines if you want extended PWM usec range for some (a range) servos
+#define EXTENDED_TO_PWM_MIN 500
+#define EXTENDED_TO_PWM_MAX 2500
 // -------- Parameters for the vario -----
 #define SENSITIVITY_MIN 100
 #define SENSITIVITY_MAX 300
 #define SENSITIVITY_MIN_AT 100
 #define SENSITIVITY_MAX_AT 1000
 #define VARIOHYSTERESIS 5
+
+// --------- Parameters for Temperature(s) when measured by a thermistor ---------------
+// uncomment the next line when a thermistor is used instead of a TP36 ic and then specify the pull up resitor and the NTC param
+//#define RESISTOR_FOR_TEMPERATURE 4700      // resistance connected to 3.3V Vcc (in Ohm); other pin is connected to thermistor and analog pin
+#define STEINHART_A 7.00111E-4   // these parameters are specific to the NTC being used.(here e.g. for a 100k thermistor for 3D printer)
+#define STEINHART_B 2.1644E-4
+#define STEINHART_C 1.0619E-07
+
 
 // --------- Parameters for GPS ---------------
 #define GPS_REFRESH_RATE 10 // For Ublox GPS, it is possible to select a refresh rate of 1Hz, 5Hz (defeult) or 10Hz 
@@ -176,14 +193,14 @@
 #define ADS1_MEASURE A0_TO_GND ,  A1_TO_GND , A2_TO_GND , A3_TO_GND // select 4 values between A0_TO_A1, A0_TO_A3, A1_TO_A3, A2_TO_A3, A0_TO_GND, A1_TO_GND, A2_TO_GND, A3_TO_GND, ADS_OFF
 #define ADS1_FULL_SCALE_VOLT  MV4096, MV4096, MV4096, MV4096 //  select between MV6144 MV4096 MV2048 MV1024 MV512 MV256
 #define ADS1_OFFSET 0.0, 0.0 , 0.0 , 0.0 // can be a float (positive or negative)
-#define ADS1_SCALE 1.0, 1.0, 1.0, 1.0 // can be a float
+#define ADS1_SCALE 3.7, 3.7, 3.7, 3.7 // can be a float
 #define ADS1_RATE  MS5 , MS5, MS5 , MS5 // select between MS137, MS69, MS35, MS18, MS9, MS5, MS3 , MS2
 #define ADS1_AVERAGING_ON 10 , 10, 10, 10 // number of values used for averaging (must be between 1 and 254) 
 
 #define ADS2_MEASURE A0_TO_GND ,  A1_TO_GND , A2_TO_GND , A3_TO_GND // select 4 values between A0_TO_A1, A0_TO_A3, A1_TO_A3, A2_TO_A3, A0_TO_GND, A1_TO_GND, A2_TO_GND, A3_TO_GND, ADS_OFF
 #define ADS2_FULL_SCALE_VOLT  MV4096, MV4096, MV4096, MV4096 //  select between MV6144 MV4096 MV2048 MV1024 MV512 MV256
 #define ADS2_OFFSET 0.0, 0.0 , 0.0 , 0.0 // can be a float (positive or negative)
-#define ADS2_SCALE 1.0, 1.0, 1.0, 1.0 // can be a float
+#define ADS2_SCALE 3.7, 3.7, 3.7, 3.7 // can be a float
 #define ADS2_RATE  MS5 , MS5, MS5 , MS5 // select between MS137, MS69, MS35, MS18, MS9, MS5, MS3 , MS2
 #define ADS2_AVERAGING_ON 10 , 10, 10, 10 // number of values used for averaging (must be between 1 and 254) 
 
@@ -197,16 +214,22 @@
 #define SDPXX_ADDRESS   0x25 // 0x25 is the I2C adress of a SDP810 sensor
 //#define USE_ADP810_INSTEAD_OF_SDPxx  // uncoment this line if you use a ADP810 instead of a SDPxx
 
+// --------- Parameters for XGZP6897D -------------
+
+#define XGZP_K_FACTOR 8192.0 ;  // See datasheet : K depends on the sensor model (related to the max pos pressure being measured)
+                              // 8192.0 is the value when max sensor pressure is 1000Pa (1kPa) like XGZP6897D001KPDPN
+
 // --------- Parameter for MPU6050 ---------------------------------------
 #define ACC_MAX_SCALE_G 2 // maximum acceleration in G (can only be 2,4,8, 16)
 #define GYRO_MAX_SCALE_DEGREE 2000  // max gyro rate : degree per sec
 #define CALIBRATE_GYRO_ON_RESET     // uncomment to avoid gyro calibration on reset
+
 // --------- Parameters for Compensated Vspeed by airspeed ----------------
 #define DTE_DEFAULT_COMPENSATION_FACTOR 1.10  // used when a channel is not used to setup the factor
 
 // ---------- ESC --------------------------------------------------------
-#define ESC_MAX_CURRENT 250000.0// used for Hobbywing V4 to reject dummy values ; 250000 is in ma = 250 A 
-#define ESC_MIN_THROTTLE 256    // used for Hobbywing V4 to reject dummy values ; 1024 = 100%; so e.g. 256 = 25% of max
+#define ESC_MAX_CURRENT 250000.0 // used for Hobbywing V4 to reject dummy values ; 250000 is in ma = 250 A 
+#define ESC_MIN_THROTTLE 254    // used for Hobbywing V4 to reject dummy values ; 1024 = 100%; so e.g. 256 = 25% of max
 
 // -------------- Camera stabilizer ----------------------------------------
 // uncomment PITCH_CONTROL_CHANNEL and/or ROLL_CONTROL_CHANNEL if you want to stabilize a camera on those axis)
@@ -228,9 +251,20 @@
 
 // --------- Gyro Parameters ---------------
 // 
+// see the document about gyro in doc folder
 
-
-
+// --------- Sequencers parameters ---------
+//
+// Parameters are explained in readme section and are filled only with a usb/serial command
+// Still for Frsky protocols, it is also possible to ask oXs to fill a telemetry field that gives information about the generated PWM/analog signal of each of the max 16 sequencer.
+// In order to group all 16 sequencers in on field of 32 bits, each sequencer is coded only on 3 values:
+//    0 when PWM/analog signal is 0%
+//    1 when PWM/analog signal is > 0%
+//    2 when PWM/analog signal is < 0%
+// This is normally enough when there is only 2 or 3 sequences per sequencer (e.g. one ON and one OFF) 
+// The value (binary 32 bits) and must (e.g. with a Lua script) be decoded using up to 16X the rest of a division by 3 (=modulo 3).  
+//  To get this telemetry field, uncomment next #define line 
+#define USE_RESERVE3_FOR_SPORT_FEEDBACK_FOR_SEQUENCES
 // --------- Default parameters -------------
 // Many parameters can be edited using a serial monitor without having to compile/reflash the RP2040  
 // If you want to make an uf2 flie with specific parameters (and so, avoid having to use the serial monitor commands),
@@ -273,12 +307,12 @@
  #define _pinLed  16
  #define _protocol  'S' // S = Sport, C = crossfire, J = Jeti
  #define _crsfBaudrate  420000
- #define _scaleVolt1  1.0
- #define _scaleVolt2  1.0
+ #define _scaleVolt1  4.29// for 2S
+ #define _scaleVolt2  50
  #define _scaleVolt3  1.0
  #define _scaleVolt4  1.0
  #define _offset1  0.0
- #define _offset2  0.0
+ #define _offset2  82500
  #define _offset3  0.0
  #define _offset4  0.0
  #define _gpsType  'U' 
@@ -293,7 +327,7 @@
 // #define _gyroOffsetZ;
 #define _temperature 0XFF
 #define _VspeedCompChannel 0XFF
-#define _ledInverted 'N'
+#define _ledInverted 'Y'
 #define _CamPitchChannel 0xFF
 #define _CamRollChannel 0xFF
 #define _CamPitchRatio 0xFF
@@ -303,6 +337,10 @@
 #define _pinEsc 0xFF
 #define _escType 0xFF
 #define _pwmHz 50  // 50 hz per default
+#define _pinSpiCs   255   // default locator/spi is desabled.
+#define _pinSpiSck  255   // 10, 14, 26 (for spi1)  or 2, 6, 18, 22 (for spi0)
+#define _pinSpiMosi 255     // 11, 15, 27 (for spi1)  or 3, 7, 18, 23 (for spi0)
+#define _pinSpiMiso 255     // 8, 12, 24, 28 (for spi1) or 0, 4, 16, 20 (for spio)
 
 // ------  for gyro   -------
 #define _gyroChanControl 0xFF // Rc channel used to say if gyro is implemented or not and to select the mode and the general gain. Value must be in range 1/16 or 255 (no gyro)
@@ -355,9 +393,17 @@
 #define _gyroAutolevel true         // true means that stabilize mode replace hold mode
 #define _mpuOrientationH 4           // upper face when plane is horizontal, last 4 bits= axis being up when nose is up; default is 4 (Z axis point up)
 #define _mpuOrientationV 0           // upper face when plane is vertical (nose up) ; default is 0 (X axis point to the nose)
-                                        // for both  0=X+, 1=X- , 2=Y+ , 3=Y- , 4=Z+, 5=Z- , 6=error ;																									  
-// --------- Reserve for developer. ---------
+                                        // for both  0=X+, 1=X- , 2=Y+ , 3=Y- , 4=Z+, 5=Z- , 6=error ;
 
+// ------------- model locator -------------
+// next lines allow to select the frequency being used by the locator (in 3 bytes most, mid, less).
+// It must be the same values on oXs side and on locator receiver side
+#define LORA_REG_FRF_MSB                            0x06  //frequency (in steps of 61.035 Hz)
+#define LORA_REG_FRF_MID                            0x07  //frequency
+#define LORA_REG_FRF_LSB                            0x08  //frequency
+
+
+// --------- Reserve for developer. ---------
 
 typedef struct {
   int32_t value ;
@@ -368,4 +414,5 @@ typedef struct {
 // I activate this when I buid a device for Sport with voltage measured on VOLT2 instead of VOLT1 (because it is easier to solder the resistor to Grnd)
 //#define SKIP_VOLT1_3_4
 
-
+//#define YES 1
+//#define NO 0

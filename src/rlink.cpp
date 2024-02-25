@@ -102,7 +102,7 @@ void handleRlink()
         }
         if (fields[NUMSAT].available) 
         {
-                streamData.gps_sats = fields[NUMSAT].value;
+            streamData.gps_sats = fields[NUMSAT].value;
         }        
     }
     if (fields[AIRSPEED].available) 

@@ -32,6 +32,7 @@
 #include "SPL06.h"
 #include "ms4525.h"
 #include "sdp3x.h"
+#include "XGZP6897D.h"
 
 #include "exbus.h"
 #include "tools.h"
@@ -59,6 +60,7 @@ extern SPL06 baro2;
 extern BMP280 baro3;
 extern MS4525 ms4525;
 extern SDP3X sdp3x; 
+extern XGZP  xgzp;
 extern GPS gps;
 
 extern CONFIG config;
@@ -175,6 +177,12 @@ JETISENSOR_CONST sensorsParam[] =  // value in this table are in the same order 
     { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  ACC_Y,
     { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  ACC_Z,
     
+    { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  RESERVE3
+    { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  RESERVE4
+    { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  RESERVE5
+    { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  RESERVE6
+    { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  RESERVE7
+    
     { 0      , "oXs"         , " "         , EXBUS_TYPE_DEVICE,     0 , 0},  // identify the name of the device      
 };
 
@@ -277,13 +285,13 @@ void setupExbusList(bool activateAllFields){
             exbusFieldList[exbusMaxFields++] = RPM ; 
         #endif
     }
-    if (( ms4525.airspeedInstalled || sdp3x.airspeedInstalled)  ||  activateAllFields) {
+    if (( ms4525.airspeedInstalled || sdp3x.airspeedInstalled || xgzp.airspeedInstalled)  ||  activateAllFields) {
         #if defined(P_AIRSPEED) && (P_AIRSPEED > 0)
             exbusMaxPooling[AIRSPEED] = P_AIRSPEED;    
             exbusFieldList[exbusMaxFields++] = AIRSPEED ; 
         #endif
     }
-    if (( ( ms4525.airspeedInstalled || sdp3x.airspeedInstalled) && ( baro1.baroInstalled || baro2.baroInstalled || baro3.baroInstalled) )  ||  activateAllFields) {
+    if (( ( ms4525.airspeedInstalled || sdp3x.airspeedInstalled || xgzp.airspeedInstalled) && ( baro1.baroInstalled || baro2.baroInstalled || baro3.baroInstalled) )  ||  activateAllFields) {
         #if defined(P_AIRSPEED_COMPENSATED_VSPEED) && (P_AIRSPEED_COMPENSATED_VSPEED > 0)
             exbusMaxPooling[AIRSPEED_COMPENSATED_VSPEED] = P_AIRSPEED_COMPENSATED_VSPEED;
             exbusFieldList[exbusMaxFields++] = AIRSPEED_COMPENSATED_VSPEED ; 

@@ -13,7 +13,10 @@
 #include "i2c_slave.h"
 #include "hitec.h"
 #include <cstdlib>
-#include <cstring>
+
+
+
+
 
 extern CONFIG config;
 
@@ -22,26 +25,26 @@ extern field fields[];  // list of all telemetry fields that are measured
 uint32_t nowHitecMs=millisRp();
 
 static sensor_hitec_t *sensor;
-uint8_t _displayBuffer;
 
 void setupHitec(){
  
     if ( config.pinPrimIn == 255 || config.pinTlm == 255 || config.protocol != 'T') return; // skip if pins are not defined and if protocol is not Hitec  
+    
     //sensor = malloc(sizeof(sensor_hitec_t));
     *sensor = (sensor_hitec_t){{0}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}};
       
-    i2c_init( i2c0, 100 * 1000);
+    i2c_init( i2c0, 400 * 1000);
     gpio_set_function(config.pinPrimIn, GPIO_FUNC_I2C);
 	gpio_pull_up(config.pinPrimIn);
     gpio_set_function(config.pinTlm, GPIO_FUNC_I2C);
     gpio_pull_up(config.pinTlm);
 	
-    //i2c_slave_init(i2c0, HITEC_I2C_ADDRESS, &i2c_hitec_handler);
-    i2c_set_slave_mode(i2c0, true, HITEC_I2C_ADDRESS);
-    *I2C0_INTR_MASK = I2C_INTR_MASK_RD_REQ;
-    irq_set_exclusive_handler(I2C0_IRQ, runHitecRequest);
-    irq_set_enabled(I2C0_IRQ, true);    
-    free(sensor);//libère la mémoire après appel  de malloc.
+    i2c_slave_init(i2c0, HITEC_I2C_ADDRESS, &i2c_hitec_handler);
+    // i2c_set_slave_mode(i2c0, true, HITEC_I2C_ADDRESS);
+    // *I2C0_INTR_MASK = I2C_INTR_MASK_RD_REQ;
+    // irq_set_exclusive_handler(I2C0_IRQ, runHitecRequest);
+    // irq_set_enabled(I2C0_IRQ, true);    
+    //free(sensor);//libère la mémoire après appel  de malloc.
 	
 }
 

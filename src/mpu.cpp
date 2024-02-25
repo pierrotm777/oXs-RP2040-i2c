@@ -215,7 +215,7 @@ void MPU::calibrationHorizontalExecute()  //
         uint8_t val = 0x3B;
         uint8_t buffer[14]; 
         if (i2c_write_timeout_us(i2c1, MPU6050_DEFAULT_ADDRESS, &val, 1, true,1000)<0) { // true to keep master control of bus
-            printf("Write error for MPU6050 calibration at 0X3B\n");
+            printf("Write error for MPU6050 calibration at 0X3B command\n");
             return;
         }
         if ( i2c_read_timeout_us(i2c1, MPU6050_DEFAULT_ADDRESS, buffer, 14, false, 3500) <0){
@@ -250,12 +250,12 @@ void MPU::calibrationHorizontalExecute()  //
         if (gz > gzMax) gzMax = gz;
     }
     // here we know the offsets but still have to identify the gravity, set mpuOrientationH and take gravity out of offset 
-    #define MAX_ACC_DIFF 100
+    #define MAX_ACC_DIFF 500
     if (((axMax - axMin) > MAX_ACC_DIFF) or ((ayMax - ayMin) > MAX_ACC_DIFF) or ((azMax - azMin) > MAX_ACC_DIFF)) {
         printf ("Error in IMU calibration: to much variations in the acceleration values\n");
         return;
     }
-    #define MAX_GYRO_DIFF 100
+    #define MAX_GYRO_DIFF 200
     if (((gxMax - gxMin) > MAX_GYRO_DIFF) or ((gyMax - gyMin) > MAX_GYRO_DIFF) or ((gzMax - gzMin) > MAX_GYRO_DIFF)) {
         printf ("Error in IMU calibration: to much variations in the gyro rates values\n");
         return;

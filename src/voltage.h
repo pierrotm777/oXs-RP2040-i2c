@@ -8,7 +8,7 @@
 
 #define MAX_NBR_VOLTAGES 4 // number of pins available for ADC
 #define VOLTAGEINTERVAL 1000 // minimum interval between 2 reads (usec) (as there are 4 adc pin, the interval for one pin is 4X more)
-#define SUM_COUNT_MAX_VOLTAGE 50 // number of ADC conversions to calculate averages (there is 2 conversions per loop, so this is in fact 100 measurements)
+#define SUM_COUNT_MAX_VOLTAGE 250 // number of ADC conversions to calculate averages (there is 2 conversions per loop, so this is in fact 500 measurements)
 #define FIRST_ANALOG_PIN 26
 class VOLTAGE
 {
@@ -21,9 +21,12 @@ private:
     uint8_t pin[MAX_NBR_VOLTAGES]  =  { 26, 27, 28 ,29};            // pin number to use to read each voltage (See hardware setting in oXs_config.h)  
     float offset[MAX_NBR_VOLTAGES] = { 0.0 } ;               // offset to apply while converting ADC to millivolt (See setting in oXs_config.h)  
     float mVoltPerStep[MAX_NBR_VOLTAGES] ;       // rate to apply while converting ADC to millivolt (See setting in oXs_config.h)  
-    int32_t sumVoltage[MAX_NBR_VOLTAGES] = { 0,0,0};       // used to calculate average voltage
+    uint32_t sumVoltage[MAX_NBR_VOLTAGES] = { 0,0,0 ,0};       // used to calculate average voltage
     float consumedMah = 0 ;
-
+    //uint16_t adcMin[MAX_NBR_VOLTAGES] = { 0XFFFF , 0XFFFF , 0XFFFF , 0XFFFF } ; // use to debug.
+    //uint16_t adcMax[MAX_NBR_VOLTAGES] = { 0, 0, 0, 0 };
+    //uint16_t adcAvg[MAX_NBR_VOLTAGES] = { 0, 0, 0, 0 };
+    void convertNtcVoltToTemp (float &adcValue );
 };
 /*
 struct VOLTAGEDATA {
