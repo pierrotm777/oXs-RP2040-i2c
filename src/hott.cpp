@@ -26,6 +26,7 @@ It is possible to send some info to reverse some fields on the display and to ac
 #include <inttypes.h> // used by PRIu32
 #include "sport.h"
 #include "string.h" // used for memset
+#include "ads1115.h"
 
 #ifdef DEBUG
 // ************************* here Several parameters to help debugging
@@ -39,6 +40,9 @@ extern field fields[];  // list of all telemetry fields and parameters used by S
 extern GPS gps;
 extern CONFIG config;
 extern uint8_t debugTlm;
+extern ADS1115 adc1;
+extern ADS1115 adc2;
+
 
 // one pio and 2 state machines are used to manage the hott bus in halfduplex
 // one state machine (sm) handle the TX and the second the RX
@@ -252,7 +256,34 @@ bool fillHottGamFrame(){
     TxHottData.gamMsg.sensor_id     = 0xd0 ;
     TxHottData.gamMsg.stop_byte     = 0x7D ;
 // in general air module data to fill are:
-    // TxHottData.gamMsg.cell[0] =  voltageData->mVoltCell[0] /20 ; // Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
+    if (adc1.adsInstalled ){
+        if (fields[ADS_1_1].available ) {
+            if ( fields[ADS_1_1].value >= 5060) { TxHottData.gamMsg.cell[0] = 253;}
+            else if ( fields[ADS_1_1].value >= 0) { TxHottData.gamMsg.cell[0] =  (uint8_t) (fields[ADS_1_1].value /20) ;} // Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
+        }
+        if (fields[ADS_1_2].available ) {
+            if ( fields[ADS_1_2].value >= 5060) { TxHottData.gamMsg.cell[1] = 253;}
+            else if ( fields[ADS_1_2].value >= 0) { TxHottData.gamMsg.cell[1] =  (uint8_t) (fields[ADS_1_2].value /20) ;} // Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
+        }
+        if (fields[ADS_1_3].available ) {
+            if ( fields[ADS_1_3].value >= 5060) { TxHottData.gamMsg.cell[2] = 253;}
+            else if ( fields[ADS_1_3].value >= 0) { TxHottData.gamMsg.cell[2] =  (uint8_t) (fields[ADS_1_3].value /20) ; }// Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
+        }
+        if (fields[ADS_1_4].available ) {
+            if ( fields[ADS_1_4].value >= 5060) { TxHottData.gamMsg.cell[3] = 253;}
+            else if ( fields[ADS_1_4].value >= 0) { TxHottData.gamMsg.cell[3] =  (uint8_t) (fields[ADS_1_4].value /20) ; }// Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
+        }
+    }
+    if (adc2.adsInstalled ){
+        if (fields[ADS_2_1].available ) {
+            if ( fields[ADS_2_1].value >= 5060) { TxHottData.gamMsg.cell[4] = 253;}
+            else if ( fields[ADS_2_1].value >= 0) { TxHottData.gamMsg.cell[4] =  (uint8_t) (fields[ADS_2_1].value /20) ;} // Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
+        }
+        if (fields[ADS_2_2].available ) {
+            if ( fields[ADS_2_2].value >= 5060) { TxHottData.gamMsg.cell[5] = 253;}
+            else if ( fields[ADS_2_2].value >= 0) { TxHottData.gamMsg.cell[5] =  (uint8_t) (fields[ADS_2_2].value) /20 ;} // Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
+        }
+    }    
     // TxHottData.gamMsg.cell[1] =  voltageData->mVoltCell[1] /20 ; // Volt Cell 2 (in 2 mV increments, 210 == 4.20 V)
     // TxHottData.gamMsg.cell[2] =  voltageData->mVoltCell[2] /20 ; // Volt Cell 3 (in 2 mV increments, 210 == 4.20 V)
     // TxHottData.gamMsg.cell[3] =  voltageData->mVoltCell[3] /20 ; // Volt Cell 4 (in 2 mV increments, 210 == 4.20 V)
@@ -296,8 +327,11 @@ bool fillHottGamFrame(){
     }
     // TxHottData.gamMsg.speed =  airSpeedData->airSpeed.value  ;                  //  Km/h 
     // TxHottData.gamMsg.min_cell_volt =  voltageData->mVoltCellMin /20 ; // minimum cell voltage in 2mV steps. 124 = 2,48V
-    // TxHottData.gamMsg.warning_beeps = warning_beeps_Hott();   // Transmitter warning message
-
+    #ifdef HOTT_MIN_VOLTAGE
+    if( fields[MVOLT].available ) {
+        TxHottData.gamMsg.warning_beeps = warning_beeps_Hott();   // Transmitter warning message
+    }
+    #endif
 // field of msg not implemented
 //  byte climbrate3s;                     //#28 climb rate in m/3sec. Value of 120 = 0m/3sec
 //  byte min_cell_volt_num;               //#38 number of the cell with the lowest voltage
@@ -407,9 +441,9 @@ bool fillHottGpsFrame(){
 
 
 
-#if defined(NUMBEROFCELLS) && (NUMBEROFCELLS > 0) && defined(CELL_UNDERVOLTAGE_WARNING)
+#if defined(HOTT_MIN_VOLTAGE) or defined(HOTT_MAX_CONSUMED_CAPACITY) 
  
- byte OXS_OUT::warning_beeps_Hott(void) {       // Determine whether a warning has to be sent to the transmitter. 
+ uint8_t warning_beeps_Hott(void) {       // Determine whether a warning has to be sent to the transmitter. 
                                                 // Define the state variables for the state machine controlling the warning generation.
                                                 // W_IDLE is the IDLE state but that name cannot be used because IDLE is already defined in oXs_out_hott.h.
      static enum {W_IDLE = 0, WARNING, DEADTIME} state = W_IDLE;
@@ -417,21 +451,34 @@ bool fillHottGpsFrame(){
      static uint8_t current_warning;
       // In order not to flood the transmitter with warnings, we transmit our warnings only every 3 seconds.
       // If the dead time is over, fall back into the idle state.
-     if (state == DEADTIME && millisRp() - warning_start_time > 3000)  state = W_IDLE;
+     if (state == DEADTIME && (millisRp() - warning_start_time) > 3000)  state = W_IDLE;
       // State WARNING indicates that we just started to transmit a warning.
       // Repeat it for 500ms to make sure the transmitter can receive it.
       // After 500ms we stop transmitting the warning and disable new warnings for a while.
-     if (state == WARNING && millisRp() - warning_start_time > 500) {
+     if (state == WARNING && (millisRp() - warning_start_time) > 500) {
        state = DEADTIME;
        current_warning = 0;
      }
      // In the idle state, we are ready to accept new warnings.
      if (state == W_IDLE) {
-        if (voltageData->mVoltCellMin < CELL_UNDERVOLTAGE_WARNING) {
+        #ifdef HOTT_MIN_VOLTAGE 
+        if (fields[MVOLT].value < HOTT_MIN_VOLTAGE) {
             warning_start_time = millisRp();
             state = WARNING;
-            current_warning = 17; /* Cell undervoltage warning */
+            current_warning = 0X10; // power voltage warning 
         }
+        #endif
+
+        #ifdef HOTT_MAX_CONSUMED_CAPACITY
+        if (fields[CAPACITY].value > HOTT_MAX_CONSUMED_CAPACITY) {
+            if (state == W_IDLE){
+                warning_start_time = millisRp();
+                state = WARNING;
+                current_warning = 0X16; // max consumed capacity warning
+            }
+        }
+        #endif
+        
      }
      return current_warning;
  }

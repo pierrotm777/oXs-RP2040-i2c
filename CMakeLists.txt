@@ -1,3 +1,19 @@
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.1.0)
+set(toolchainVersion 13_3_Rel1)
+set(picotoolVersion 2.1.0)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
+set(PICO_BOARD pico CACHE STRING "Board type")
+
 
 cmake_minimum_required(VERSION 3.13)
 
@@ -29,11 +45,13 @@ pico_generate_pio_header(oXs  ${CMAKE_CURRENT_LIST_DIR}/src/uart_srxl2_tx_rx.pio
 pico_generate_pio_header(oXs  ${CMAKE_CURRENT_LIST_DIR}/src/uart_exbus_tx_rx.pio )
 pico_generate_pio_header(oXs  ${CMAKE_CURRENT_LIST_DIR}/src/uart_logger_tx.pio )
 pico_generate_pio_header(oXs  ${CMAKE_CURRENT_LIST_DIR}/src/uart_esc_rx.pio )
-
+pico_generate_pio_header(oXs  ${CMAKE_CURRENT_LIST_DIR}/src/uart_frsky_hub_tx.pio)
+pico_generate_pio_header(oXs ${CMAKE_CURRENT_LIST_DIR}/src/i2c_multi.pio)
 
 file(GLOB oXs_SRC CONFIGURE_DEPENDS "src/*.h" "src/*.cpp")
 
 target_sources(oXs PRIVATE ${oXs_SRC}  )
+target_sources(oXs PRIVATE src/i2c_multi.c)
 
 target_link_libraries(oXs PRIVATE
         pico_stdlib
@@ -58,10 +76,10 @@ pico_enable_stdio_uart(oXs 0)
 pico_add_extra_outputs(oXs)
 
 
+# Copy the generated UF2 to the src folder (manual flash to RP2040)
+# Copy the UF2 file to the project root
 add_custom_command(TARGET oXs POST_BUILD
-  COMMAND ${CMAKE_COMMAND}
-  ARGS -E copy oXs.uf2 ${CMAKE_SOURCE_DIR}   
+    COMMAND ${CMAKE_COMMAND} -E copy
+    "${CMAKE_CURRENT_BINARY_DIR}/oXs.uf2"
+    "${CMAKE_SOURCE_DIR}/oXs.uf2"
 )
-#  ARGS -E copy oXs.uf2 ${CMAKE_SOURCE_DIR} it was with -E   
-# copy the uf2 file to E: drive
-add_custom_command(TARGET oXs POST_BUILD COMMAND ${CMAKE_COMMAND} ARGS -E copy oXs.uf2 E: )

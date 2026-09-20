@@ -32,16 +32,27 @@ uint16_t sbusFrame16Bits[25];
 extern uint32_t lastRcChannels;
 extern uint32_t lastPriChannelsMillis; // used in crsf.cpp and in sbus_in.cpp to say that we got Rc channels data
 extern uint32_t lastSecChannelsMillis; // used in crsf.cpp and in sbus_in.cpp to say that we got Rc channels data
-extern bool newRcChannelsReceivedForPWM ;  // used to update the PWM data
+
+bool rcChannelsUsChanged = true; // says that rcChannelUs changed or not (to avoid some updates)
+bool rcChannelsUsCorrChanged = true; // says that rcChannelUsCorr changed or not (to avoid some updates)        
+
+extern bool newRcChannelsFrameReceived ;  // used to update the PWM data
 extern bool newRcChannelsReceivedForLogger;  // used to update the PWM data
+
 
 //extern int16_t rcPwmChannelsComp[16];        // Pwm us taking care of gyro corrections 
 extern int16_t rcChannelsUsCorr[16];        // Pwm us taking care of gyro corrections
+
+        
+
 
 extern bool sbusPriMissingFlag;
 extern bool sbusSecMissingFlag;
 extern bool sbusPriFailsafeFlag;
 extern bool sbusSecFailsafeFlag;
+extern bool sbusOutMissingFlag ;
+extern bool sbusOutFailsafeFlag ;
+
 
 // remapping from sbus value to pwm value
 extern uint16_t fromSbusMin;
@@ -83,7 +94,11 @@ uint16_t rcChannelsUs[16]; // rc channels values from receiver remap in us
 void setupSbusOutPio(){
         // setup the PIO for TX UART
         uint offsetTx = pio_add_program(pioTxSbus, &uart_sbus_tx_program);
-        uart_sbus_tx_program_init(pioTxSbus, smTxSbus, offsetTx, config.pinSbusOut , SERIAL_BAUD_SBUS);
+        bool invertedSbus = false ; // standard sbus is an inverted UART
+        #ifdef INVERT_SBUS_OUTPUT
+        invertedSbus = true;
+        #endif
+        uart_sbus_tx_program_init(pioTxSbus, smTxSbus, offsetTx, config.pinSbusOut , SERIAL_BAUD_SBUS, invertedSbus);
 
         // Configure a channel to write the same word (32 bits) repeatedly to PIO0
         // SM0's TX FIFO, paced by the data request signal from that peripheral.
@@ -148,26 +163,183 @@ void setLedState(){
     //printf("%d\n", (int) ledState);
 }
 
+
+void convertSbusToUs(){ // convert sbusFrame to rcChannelUs, copy to rcChannelUsCorr (to apply gyro corrections)
+    // copy the sbus into uint16; value are in Sbus units [172/1811] not in PWM us [988/2012] = [-100/+100]
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (1 >= EXTENDED_RANGE_FROM_CHANNEL ) and (1 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[0] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch0) ;  
+    #else
+    rcChannelsUs[0] = fmap((uint16_t) sbusFrame.rcChannelsData.ch0) ;  
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (2 >= EXTENDED_RANGE_FROM_CHANNEL ) and (2 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[1] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch1) ;  
+    #else
+    rcChannelsUs[1] = fmap((uint16_t) sbusFrame.rcChannelsData.ch1) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (3 >= EXTENDED_RANGE_FROM_CHANNEL ) and (3 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[2] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch2) ;  
+    #else
+    rcChannelsUs[2] = fmap((uint16_t) sbusFrame.rcChannelsData.ch2) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (4 >= EXTENDED_RANGE_FROM_CHANNEL ) and (4 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[3] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch3) ;  
+    #else
+    rcChannelsUs[3] = fmap((uint16_t) sbusFrame.rcChannelsData.ch3) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (5 >= EXTENDED_RANGE_FROM_CHANNEL ) and (5 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[4] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch4) ;  
+    #else
+    rcChannelsUs[4] = fmap((uint16_t) sbusFrame.rcChannelsData.ch4) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (6 >= EXTENDED_RANGE_FROM_CHANNEL ) and (6 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[5] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch5) ;  
+    #else
+    rcChannelsUs[5] = fmap((uint16_t) sbusFrame.rcChannelsData.ch5) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (7 >= EXTENDED_RANGE_FROM_CHANNEL ) and (7 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[6] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch6) ;  
+    #else
+    rcChannelsUs[6] = fmap((uint16_t) sbusFrame.rcChannelsData.ch6) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (8 >= EXTENDED_RANGE_FROM_CHANNEL ) and (8 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[7] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch7) ;  
+    #else
+    rcChannelsUs[7] = fmap((uint16_t) sbusFrame.rcChannelsData.ch7) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (9 >= EXTENDED_RANGE_FROM_CHANNEL ) and (9 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[8] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch8) ;  
+    #else
+    rcChannelsUs[8] = fmap((uint16_t) sbusFrame.rcChannelsData.ch8) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (10 >= EXTENDED_RANGE_FROM_CHANNEL ) and (10 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[9] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch9) ;  
+    #else
+    rcChannelsUs[9] = fmap((uint16_t) sbusFrame.rcChannelsData.ch9) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (11 >= EXTENDED_RANGE_FROM_CHANNEL ) and (11 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[10] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch10) ;  
+    #else
+    rcChannelsUs[10] = fmap((uint16_t) sbusFrame.rcChannelsData.ch10) ;  
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (12 >= EXTENDED_RANGE_FROM_CHANNEL ) and (12 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[11] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch11) ;  
+    #else
+    rcChannelsUs[11] = fmap((uint16_t) sbusFrame.rcChannelsData.ch11) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (13 >= EXTENDED_RANGE_FROM_CHANNEL ) and (13 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[12] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch12) ;  
+    #else
+    rcChannelsUs[12] = fmap((uint16_t) sbusFrame.rcChannelsData.ch12) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (14 >= EXTENDED_RANGE_FROM_CHANNEL ) and (14 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[13] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch13) ;  
+    #else
+    rcChannelsUs[13] = fmap((uint16_t) sbusFrame.rcChannelsData.ch13) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (15 >= EXTENDED_RANGE_FROM_CHANNEL ) and (15 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[14] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch14) ;  
+    #else
+    rcChannelsUs[14] = fmap((uint16_t) sbusFrame.rcChannelsData.ch14) ;
+    #endif
+    #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
+            (16 >= EXTENDED_RANGE_FROM_CHANNEL ) and (16 <= EXTENDED_RANGE_UP_TO_CHANNEL)
+    rcChannelsUs[15] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch15) ;  
+    #else
+    rcChannelsUs[15] = fmap((uint16_t) sbusFrame.rcChannelsData.ch15) ;
+    #endif
+
+    memcpy(rcChannelsUsCorr , rcChannelsUs , sizeof(rcChannelsUs)); // init the fields with corrections (for Gyro and camera) 
+}
+
+uint32_t lastSetRcChannelMs = 0;
+
+void setRcChannels(){
+    uint32_t now = millisRp();    
+    if (!lastRcChannels) return;  // do not apply failsafe when we never get a RC channels frame 
+    // Reload rcChannelsUs and rcChannelsCorrUs when a new frame has been received or at least each 9 ms interval
+    if ( (newRcChannelsFrameReceived) or (( now - lastSetRcChannelMs) > 9) ) {
+        lastSetRcChannelMs = now; // save timestamp
+        if (newRcChannelsFrameReceived ) {
+            newRcChannelsReceivedForLogger = true;  // used to update the logger data
+        } else if ( (( now - lastRcChannels) > FAILSAFE_DELAY ) and (config.failsafeType == 'C') )  { 
+            // if we do not get a recent RC channels frame whe use failsafe value if defined (even if they where already uploaded)                      
+            memcpy( &sbusFrame.rcChannelsData , &config.failsafeChannels, sizeof(config.failsafeChannels));
+            printf("failsafe values are applied\n");
+        }         
+        // note : even in failsafe mode, we reload the Rc channels
+        convertSbusToUs();    // use sbusFrame to fill rcChannelsUs and rcChannelsCorrUs
+        rcChannelsUsChanged = true;          // says that values have changed;
+        rcChannelsUsCorrChanged = true;      // says that values have changed; so gyro correction must be applied, PWM update (SbusOut is always recalculate)       
+    }
+}
+
 void fillSbusFrame(){
     static uint32_t lastSbusSentMillis = 0;
-    if (!lastRcChannels) return;  // do not generate a sbus frame when we never get a RC channels frame form crsf
-    setLedState();                // set the color of the led   
+    if (!lastRcChannels) return;  // do not generate a sbus frame when we never get a RC channels frame 
     if (config.pinSbusOut == 255) return; // skip when pin is not defined
     // normally we should test if previous dma has finished sending all previous sbus frame. 
-
     if ( (millisRp() - lastSbusSentMillis) >= 9 ) { // we send a frame once every 9 msec
+        // note this could be optimized to avoid filling sbusFrameOut again when data did not changed but there is no real added value
         lastSbusSentMillis = millisRp();   
-        sbusFrame.synchro = 0x0F ; 
-        if ( ( millisRp()- lastRcChannels) > FAILSAFE_DELAY ) { // if we do not get a RC channels frame, we apply failsafe
-            sbusFrame.flag = 0x10; // indicates a failsafe
-            if (config.failsafeType == 'C') memcpy( &sbusFrame.rcChannelsData , &config.failsafeChannels, sizeof(config.failsafeChannels));
+        sbusFrame_s sbusFrameOut;      // temporary structure to build the frame before adding parity and second stop bit
+        sbusFrameOut.synchro = 0x0F ;  // set synchro byte
+        // fill Rc data
+        uint8_t sbus[22];
+        uint16_t rcOutSbusVal[16];
+        for (uint8_t i =0; i<16; i++){ // map each Us to Sbus value.
+            rcOutSbusVal[i] = (uint16_t)(((int)rcChannelsUsCorr[i] - 342) * (int)(1792 - 191) * 2 / (1706 - 342) +  191 * 2 + 1) / 2; 
+        }    
+        sbus[0] = rcOutSbusVal[0];
+        sbus[1] = (rcOutSbusVal[0] >> 8) | (rcOutSbusVal[1] & 0x00FF)<<3;
+        sbus[2] = rcOutSbusVal[1]>>5|(rcOutSbusVal[2]<<6);
+        sbus[3] = (rcOutSbusVal[2]>>2)& 0x00ff;
+        sbus[4] = rcOutSbusVal[2]>>10| (rcOutSbusVal[3] & 0x00FF)<<1;
+        sbus[5] = rcOutSbusVal[3]>>7|  (rcOutSbusVal[4] & 0x0FF )<<4;
+        sbus[6] = rcOutSbusVal[4]>>4| (rcOutSbusVal[5] & 0xFF) <<7;
+        sbus[7] = (rcOutSbusVal[5]>>1)& 0x00ff;
+        sbus[8] = rcOutSbusVal[5]>>9| (rcOutSbusVal[6] & 0xFF)<<2;
+        sbus[9] = rcOutSbusVal[6]>>6| (rcOutSbusVal[7] & 0xFF)<<5;
+        sbus[10] = (rcOutSbusVal[7]>>3)& 0x00ff;//end
+        sbus[11] = (rcOutSbusVal[8] & 0XFF);
+        sbus[12] = (rcOutSbusVal[8]>> 8) | (rcOutSbusVal[9] & 0xFF)<<3;
+        sbus[13] = rcOutSbusVal[9]>>5 | (rcOutSbusVal[10]<<6);
+        sbus[14] = (rcOutSbusVal[10]>>2) & 0xff;
+        sbus[15] = rcOutSbusVal[10]>>10 | (rcOutSbusVal[11] & 0XFF)<<1;
+        sbus[16] = rcOutSbusVal[11]>>7 | (rcOutSbusVal[12] & 0XFF)<<4;
+        sbus[17] = rcOutSbusVal[12]>>4 | (rcOutSbusVal[13] & 0XFF)<<7;
+        sbus[18] = (rcOutSbusVal[13]>>1)& 0xff;
+        sbus[19] = rcOutSbusVal[13]>>9 | (rcOutSbusVal[14] & 0XFF)<<2;
+        sbus[20] = rcOutSbusVal[14]>>6 | (rcOutSbusVal[15] & 0XFF)<<5;
+        sbus[21] = (rcOutSbusVal[15]>>3)& 0xff;
+        memcpy( (uint8_t *) &sbusFrameOut.rcChannelsData, &sbus[0], 22) ; // copy the data to the Sbus buffer
+        
+        // fill the flags with Hold and failsafe 
+        if ( ( millisRp()- lastRcChannels) > FAILSAFE_DELAY ) { // if we do not get a RC channels frame, we set failsafe flags
+            sbusFrameOut.flag = 0x0C; // indicates a failsafe and missing 
         } else {
             sbusFrame.flag = 0x00;
+            if (sbusOutMissingFlag) sbusFrame.flag |= 0X01 << 2;   // set the flags based on what we received
+            if (sbusOutFailsafeFlag) sbusFrame.flag |= 0X01 << 3;
         }    
-        sbusFrame.endByte = 0x00;
+        sbusFrameOut.endByte = 0x00;
         //printf("ch1= %" PRIu32 "\n",sbusFrame.rcChannelsData.ch0);
-        uint8_t * ptr = (uint8_t *) &sbusFrame ;
-        for (uint8_t i = 0; i<25 ; i++){ // copy sbusframe to sbusfram16b adding the parity and extra stop byte
+        uint8_t * ptr = (uint8_t *) &sbusFrameOut ;
+        for (uint8_t i = 0; i<25 ; i++){ // copy sbusframeOut to sbusfram16b adding the parity and extra stop byte
             uint8_t c = *ptr;
             uint8_t p = ParityTable256[c];
             sbusFrame16Bits[i] = ( ((uint32_t) c) ) | ( ((uint32_t)p ) << 8) | ((uint32_t) 0x200) ;
@@ -261,119 +433,7 @@ void updatePWM(){
 
     //if (( pwmIsUsed == false) && ( seq.defsMax == 0 ) && (config.pinLogger == 255)) return ; // skip when PWM, sequencer and logger are not used
     if ( ! lastRcChannels) return ;   // skip if we do not have last channels
-    if ( newRcChannelsReceivedForPWM){  // when new Rc channel is received (flag set by CRSF_IN, SBUS, FBUS, EXBUS, SRXL2, IBUS...)
-        newRcChannelsReceivedForPWM = false;  // reset the flag
-
-        //if ( (millisRp() - lastPwmMillis) > 5 ){ // we update once every 5 msec ???? perhaps better to update at each new crsf frame in order to reduce the latency
-        //    lastPwmMillis = millisRp();
-        if ( ( millisRp()- lastRcChannels) > FAILSAFE_DELAY ) { // if we do not get a RC channels frame, apply failsafe value if defined
-            if (config.failsafeType == 'C') memcpy( &sbusFrame.rcChannelsData , &config.failsafeChannels, sizeof(config.failsafeChannels));
-        }
-        // copy the sbus into uint16; value are in Sbus units [172/1811] not in PWM us [988/2012] = [-100/+100]
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (1 >= EXTENDED_RANGE_FROM_CHANNEL ) and (1 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[0] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch0) ;  
-        #else
-        rcChannelsUs[0] = fmap((uint16_t) sbusFrame.rcChannelsData.ch0) ;  
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (2 >= EXTENDED_RANGE_FROM_CHANNEL ) and (2 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[1] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch1) ;  
-        #else
-        rcChannelsUs[1] = fmap((uint16_t) sbusFrame.rcChannelsData.ch1) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (3 >= EXTENDED_RANGE_FROM_CHANNEL ) and (3 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[2] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch2) ;  
-        #else
-        rcChannelsUs[2] = fmap((uint16_t) sbusFrame.rcChannelsData.ch2) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (4 >= EXTENDED_RANGE_FROM_CHANNEL ) and (4 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[3] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch3) ;  
-        #else
-        rcChannelsUs[3] = fmap((uint16_t) sbusFrame.rcChannelsData.ch3) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (5 >= EXTENDED_RANGE_FROM_CHANNEL ) and (5 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[4] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch4) ;  
-        #else
-        rcChannelsUs[4] = fmap((uint16_t) sbusFrame.rcChannelsData.ch4) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (6 >= EXTENDED_RANGE_FROM_CHANNEL ) and (6 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[5] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch5) ;  
-        #else
-        rcChannelsUs[5] = fmap((uint16_t) sbusFrame.rcChannelsData.ch5) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (7 >= EXTENDED_RANGE_FROM_CHANNEL ) and (7 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[6] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch6) ;  
-        #else
-        rcChannelsUs[6] = fmap((uint16_t) sbusFrame.rcChannelsData.ch6) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (8 >= EXTENDED_RANGE_FROM_CHANNEL ) and (8 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[7] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch7) ;  
-        #else
-        rcChannelsUs[7] = fmap((uint16_t) sbusFrame.rcChannelsData.ch7) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (9 >= EXTENDED_RANGE_FROM_CHANNEL ) and (9 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[8] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch8) ;  
-        #else
-        rcChannelsUs[8] = fmap((uint16_t) sbusFrame.rcChannelsData.ch8) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (10 >= EXTENDED_RANGE_FROM_CHANNEL ) and (10 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[9] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch9) ;  
-        #else
-        rcChannelsUs[9] = fmap((uint16_t) sbusFrame.rcChannelsData.ch9) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (11 >= EXTENDED_RANGE_FROM_CHANNEL ) and (11 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[10] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch10) ;  
-        #else
-        rcChannelsUs[10] = fmap((uint16_t) sbusFrame.rcChannelsData.ch10) ;  
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (12 >= EXTENDED_RANGE_FROM_CHANNEL ) and (12 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[11] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch11) ;  
-        #else
-        rcChannelsUs[11] = fmap((uint16_t) sbusFrame.rcChannelsData.ch11) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (13 >= EXTENDED_RANGE_FROM_CHANNEL ) and (13 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[12] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch12) ;  
-        #else
-        rcChannelsUs[12] = fmap((uint16_t) sbusFrame.rcChannelsData.ch12) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (14 >= EXTENDED_RANGE_FROM_CHANNEL ) and (14 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[13] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch13) ;  
-        #else
-        rcChannelsUs[13] = fmap((uint16_t) sbusFrame.rcChannelsData.ch13) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (15 >= EXTENDED_RANGE_FROM_CHANNEL ) and (15 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[14] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch14) ;  
-        #else
-        rcChannelsUs[14] = fmap((uint16_t) sbusFrame.rcChannelsData.ch14) ;
-        #endif
-        #if defined(EXTENDED_RANGE_FROM_CHANNEL) and defined(EXTENDED_RANGE_UP_TO_CHANNEL) and \
-             (16 >= EXTENDED_RANGE_FROM_CHANNEL ) and (16 <= EXTENDED_RANGE_UP_TO_CHANNEL)
-        rcChannelsUs[15] = fmapExtended((uint16_t) sbusFrame.rcChannelsData.ch15) ;  
-        #else
-        rcChannelsUs[15] = fmap((uint16_t) sbusFrame.rcChannelsData.ch15) ;
-        #endif
-
-        memcpy(rcChannelsUsCorr , rcChannelsUs , sizeof(rcChannelsUs)); // init the fields with corrections (for Gyro and camera) 
-    
-        newRcChannelsReceivedForLogger = true;  // used to update the logger data
-        // apply gyro corrections in rcChannelsUsCorr[] 
-        if  (gyroIsInstalled)  {
-            applyGyroCorrections();   // calculate gyroMixer[].min and .max + rcChannelsUsCorr[] adding gyro correction to rxPwlChannels[]
-        }
+    if ( rcChannelsUsCorrChanged){  // when new Rc channel is received (flag set by CRSF_IN, SBUS, FBUS, EXBUS, SRXL2, IBUS...)
         // apply corrections for camera in rcChannelsUsCorr
         #ifdef PITCH_CONTROL_CHANNEL
         if ( (mpu.mpuInstalled) && fields[PITCH].onceAvailable) {
@@ -382,7 +442,7 @@ void updatePWM(){
             // so correction = pitch /90 * 512 * ratio /100 = pitch * ratio * 512 / 9000 = pitch *ratio * 0.0569
             // here pitch in 0.1 of degree and so we have to multiply by 512/90000 = 0.00569
             ratio = PITCH_RATIO;
-            #if defined(PITCH_RATIO_CHANNEL) //&& (PITCH_RATIO_CHANNEL >0) && (PITCH_RATIO_CHANNEL <= 16) 
+            #if defined(PITCH_RATIO_CHANNEL) && (PITCH_RATIO_CHANNEL >0) && (PITCH_RATIO_CHANNEL <= 16) 
             ratio = ( (float) rcChannelsUs[PITCH_RATIO_CHANNEL - 1] - 1500) * 0.2; // 0.2 in order to convert 500us to 100 ratio
             #endif
             _pwmValue = ((int16_t) rcChannelsUs[PITCH_CONTROL_CHANNEL - 1]) - (int16_t) (cameraPitch * ratio * 0.00569) ; 
@@ -401,7 +461,7 @@ void updatePWM(){
             // so correction = pitch /90 * 512 * ratio /100 = pitch * ratio * 512 / 9000 = pitch *ratio * 0.0569
             // here pitch in 0.1 of degree and so we have to multiply by 512/90000 = 0.00569
             ratio = ROLL_RATIO;
-            #if defined(ROLL_RATIO_CHANNEL) //&& (ROLL_RATIO_CHANNEL >0) && (ROLL_RATIO_CHANNEL <= 16) 
+            #if defined(ROLL_RATIO_CHANNEL) && (ROLL_RATIO_CHANNEL >0) && (ROLL_RATIO_CHANNEL <= 16) 
             ratio = ( (float) rcChannelsUs[ROLL_RATIO_CHANNEL - 1] - 1500) * 0.2;
             #endif
             _pwmValue = ((int16_t) rcChannelsUs[ROLL_CONTROL_CHANNEL - 1]) - (int16_t) (cameraRoll * ratio * 0.00569) ; 

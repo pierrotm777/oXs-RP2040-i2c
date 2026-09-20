@@ -1,663 +1,242 @@
-
-#include <stdio.h>
-#include "pico/stdlib.h"
-#include "hardware/irq.h"
-//#include "pico/util/queue.h"
-#include "tools.h"
+// Spektrum X-Bus for oXs RP2040 (first hardware test, MSRC i2c_multi PIO).
+// Reuses the already-tested Spektrum telemetry payload definitions shared
+// with oXs SRXL2, without coupling X-Bus to the SRXL2 UART or frame state.
+#include "xbus.h"
+#include <stdint.h>
+#include "srxl_sensors.h"
+#include "i2c_multi.h"
 #include "config.h"
 #include "param.h"
-#include "vario.h"
-#include "rpm.h"
-#include "gps.h"
 #include "tools.h"
-#include <math.h>
-
-#include "xbus.h"
-#include <cstdlib>
-#include <cstring>
-
-xbus_sensor_t *sensor;
-xbus_sensor_formatted_t *sensor_formatted;
-
-//void i2c_multi_init(PIO pio, uint pin);
-//static void i2c_request_handler(uint8_t address);
-//void xbus_i2c_handler(uint8_t address);
-void i2c_xbus_handler(i2c_inst_t *i2c, i2c_slave_event_t event);
-static void set_config();
-static uint8_t bcd8(float value, uint8_t precision);
-static uint16_t bcd16(float value, uint8_t precision);
-static uint32_t bcd32(float value, uint8_t precision);
-
-// void xbus_i2c_handler(uint8_t address)
-// {
-//     i2c_request_handler(address);
-// }
-
+#include "hardware/sync.h"
+#include "pico/stdlib.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 extern CONFIG config;
-//queue_t xbuxRxQueue ;
-
-// Globals
-double prevSpekVoltage = 0.0;
-// XBUS_UN_TELEMETRY TmBuffer = {IDENTIFIER, 0, 
-//                                 NO_DATA, NO_DATA,
-//                                 NO_DATA, NO_DATA, 
-//                                 NO_DATA, NO_DATA, 
-//                                 NO_DATA, NO_DATA, 
-//                                 NO_DATA, NO_DATA, 
-//                                 NO_DATA, NO_DATA, 
-//                                 NO_DATA, NO_DATA 
-//                                 };
-
+extern field fields[];
 extern uint8_t debugTlm;
-extern field fields[];  // list of all telemetry fields that are measured
-uint32_t nowSpekMs=millisRp();
 
-uint8_t buffer[64] = {0};
-char str_out[64];
-uint8_t pin;
+namespace {
+constexpr uint8_t kPacketLength = 16;
+constexpr uint8_t kTxLength = 32;  // safe padding if a master requests extra bytes
+constexpr uint32_t kRefreshMs = 100;
 
-void setupXbusSpektrum(){
- 
-    if ( config.pinPrimIn == 255 || config.pinTlm == 255 || config.protocol != 'X') return; // skip if pins are not defined and if protocol is not Spektrum Xbus  
-    
-    //sensor = malloc(sizeof(xbus_sensor_t));
-    *sensor = (xbus_sensor_t){{0}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}, {NULL}};
-    //sensor_formatted = malloc(sizeof(xbus_sensor_formatted_t));
-    *sensor_formatted = (xbus_sensor_formatted_t){NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
-/*
-    stdio_init_all();
+// MSRC i2c_multi consumes the buffer *after* the request callback returns.
+// A static transmit buffer is mandatory (MSRC's uint8_t buffer[16] on the
+// callback stack would have an invalid lifetime).
+uint8_t tx[kTxLength] = {};
+uint8_t published[7][kPacketLength] = {};
+uint32_t requests[7] = {};
+uint32_t lastUpdate = 0;
+uint32_t lastDebug = 0;
+bool ready = false;
 
-    PIO pio = pio0;
-    pin = config.pinTlm;//SDA0
-    i2c_multi_init(pio, pin);
-    i2c_multi_enable_address(XBUS_GPS_LOC_ID);
-    i2c_multi_enable_address(XBUS_GPS_STAT_ID);
-    i2c_multi_set_request_handler(i2c_request_handler);
+enum SensorIdx : uint8_t { AIR, GPS_LOC, GPS_STAT, ENERGY, ESC, VARIO_IDX, RPM_TEMP };
+constexpr uint8_t ids[7] = {
+    TELE_DEVICE_AIRSPEED, TELE_DEVICE_GPS_LOC, TELE_DEVICE_GPS_STATS,
+    TELE_DEVICE_RX_MAH, TELE_DEVICE_ESC, TELE_DEVICE_VARIO_S,
+    TELE_DEVICE_RPM
+};
 
-    set_config();
-    free(sensor);//Deallocate the block of memory, making it available again for future allocations
-*/
-
-    gpio_set_function(config.pinPrimIn, GPIO_FUNC_I2C);
-	gpio_pull_up(config.pinPrimIn);
-    gpio_set_function(config.pinTlm, GPIO_FUNC_I2C);
-    gpio_pull_up(config.pinTlm);
-
-    i2c_slave_init(i2c0, XBUS_GPS_LOC_ID, &i2c_xbus_handler);
-    //set_config();
-
+static int8_t indexForAddress(uint8_t addr) {
+    for (uint8_t i = 0; i < 7; ++i) if (ids[i] == addr) return static_cast<int8_t>(i);
+    return -1;
+}
+static inline bool has(fieldIdx f) { return fields[f].available; }
+static inline int32_t val(fieldIdx f) { return fields[f].value; }
+static int32_t clamped(int64_t v, int32_t lo, int32_t hi) {
+    return v < lo ? lo : v > hi ? hi : static_cast<int32_t>(v);
+}
+static int32_t roundDiv(int64_t value, int32_t divisor) {
+    return static_cast<int32_t>(value >= 0 ?
+        (value + divisor / 2) / divisor : (value - divisor / 2) / divisor);
+}
+static uint32_t bcd(uint32_t v) {
+    uint32_t out = 0;
+    for (uint32_t shift = 0; shift < 32; shift += 4) {
+        out |= (v % 10) << shift;
+        v /= 10;
+    }
+    return out;
+}
+static uint16_t be16(int32_t v) {
+    return swapBinary(static_cast<uint16_t>(v));
+}
+// oXs lat/lon: degrees * 10^7. SRXL2/X-Bus: packed BCD DDMM.mmmm.
+static uint32_t bcdCoordinate(int32_t input, bool longitude, uint8_t &flags) {
+    int64_t absolute = input < 0 ? -int64_t(input) : int64_t(input);
+    uint32_t degrees = static_cast<uint32_t>(absolute / 10000000);
+    const int64_t fraction = absolute % 10000000;
+    uint32_t m10000 = static_cast<uint32_t>((fraction * 600000LL + 5000000LL) / 10000000LL);
+    if (m10000 == 600000) { m10000 = 0; ++degrees; }
+    if (longitude && degrees >= 100) { flags |= GPS_INFO_FLAGS_LONGITUDE_GREATER_99; degrees -= 100; }
+    if (longitude) { if (input >= 0) flags |= GPS_INFO_FLAGS_IS_EAST; }
+    else if (input >= 0) flags |= GPS_INFO_FLAGS_IS_NORTH;
+    return (bcd(degrees * 100 + m10000 / 10000) << 16) | bcd(m10000 % 10000);
 }
 
-
-void i2c_xbus_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
-    switch (event) 
-    {
-        case I2C_SLAVE_RECEIVE: // master has written some data
-            //not used here
-            break;
-        case I2C_SLAVE_REQUEST: // master is requesting data
-            runXbusRequest();
-            break;
-        case I2C_SLAVE_FINISH: // master has signalled Stop / Restart
-            //not used here
-            break;
-        default:
-            break;
-    }
-
+// Don't perform floats, printf or field formatting in the I2C ISR.
+static void request(uint8_t addr) {
+    const int8_t idx = indexForAddress(addr);
+    if (idx < 0) return;
+    ++requests[idx];
+    memcpy(tx, published[idx], kPacketLength);
+    memset(tx + kPacketLength, 0xff, kTxLength - kPacketLength);
+    i2c_multi_set_write_buffer(tx);
 }
 
-//void xbus_format_sensor(uint8_t address)
-void handleXbus(uint8_t address)
-{
-    static float alt = 0;
-    switch (address)
-    {
-//     case XBUS_AIRSPEED_ID:
-//     {
-//         sensor_formatted->airspeed->airspeed = __builtin_bswap16(*sensor->airspeed[XBUS_AIRSPEED_AIRSPEED]);
-//         if (__builtin_bswap16(sensor_formatted->airspeed->airspeed) > __builtin_bswap16(sensor_formatted->airspeed->max_airspeed))
-//             sensor_formatted->airspeed->max_airspeed = sensor_formatted->airspeed->airspeed;
-//         break;
-//     }
-    case XBUS_GPS_LOC_ID:
-    {
-        uint8_t gps_flags = 0;
-        float lat = fields[LATITUDE].value;//*sensor->gps_loc[XBUS_GPS_LOC_LATITUDE];
-        if (lat < 0) // N=1,+, S=0,-
-            lat *= -1;
-        else
-            gps_flags |= 1 << XBUS_GPS_INFO_FLAGS_IS_NORTH_BIT;
-        sensor_formatted->gps_loc->latitude = bcd32((uint16_t)(lat / 60) * 100 + fmod(lat, 60), 4);
-        float lon = fields[LATITUDE].value;//*sensor->gps_loc[XBUS_GPS_LOC_LONGITUDE];
-        if (lon < 0) // E=1,+, W=0,-
-            lon *= -1;
-        else
-            gps_flags |= 1 << XBUS_GPS_INFO_FLAGS_IS_EAST_BIT;
-        if (lon >= 6000)
-        {
-            gps_flags |= 1 << XBUS_GPS_INFO_FLAGS_LONG_GREATER_99_BIT;
-            lon -= 6000;
-        }
-        sensor_formatted->gps_loc->longitude = bcd32((uint16_t)(lon / 60) * 100 + fmod(lon, 60), 4);
-        sensor_formatted->gps_loc->course = bcd16(fields[GPS_CUMUL_DIST].value,1);//bcd16(*sensor->gps_loc[XBUS_GPS_LOC_COURSE], 1);
-        sensor_formatted->gps_loc->hdop = bcd8(fields[GPS_PDOP].value,1);//bcd8(*sensor->gps_loc[XBUS_GPS_LOC_HDOP], 1);
-        alt = fields[ALTITUDE].value;//*sensor->gps_loc[XBUS_GPS_LOC_ALTITUDE];
-        if (alt < 0)
-        {
-            gps_flags |= 1 << XBUS_GPS_INFO_FLAGS_NEGATIVE_ALT_BIT;
-            alt *= -1;
-        }
-        sensor_formatted->gps_loc->gps_flags = gps_flags;
-        sensor_formatted->gps_loc->altitude_low = bcd16(fmod(alt, 1000), 1);
-        break;
-    }
-    case XBUS_GPS_STAT_ID:
-    {
-        sensor_formatted->gps_stat->speed = bcd16(*sensor->gps_stat[XBUS_GPS_STAT_SPEED], 1);
-        sensor_formatted->gps_stat->utc = bcd32(*sensor->gps_stat[XBUS_GPS_STAT_TIME], 2);
-        sensor_formatted->gps_stat->num_sats = bcd8(*sensor->gps_stat[XBUS_GPS_STAT_SATS], 0);
-        sensor_formatted->gps_stat->altitude_high = bcd8((uint8_t)(alt / 1000), 0);
-        break;
-    }
-//     case XBUS_ESC_ID:
-//     {
-//         if (sensor->esc[XBUS_ESC_RPM])
-//             sensor_formatted->esc->rpm = __builtin_bswap16(*sensor->esc[XBUS_ESC_RPM] / 10);
-//         if (sensor->esc[XBUS_ESC_VOLTAGE])
-//             sensor_formatted->esc->volts_input = __builtin_bswap16(*sensor->esc[XBUS_ESC_VOLTAGE] * 100);
-//         if (sensor->esc[XBUS_ESC_TEMPERATURE_FET])
-//             sensor_formatted->esc->temp_fet = __builtin_bswap16(*sensor->esc[XBUS_ESC_TEMPERATURE_FET] * 10);
-//         if (sensor->esc[XBUS_ESC_CURRENT])
-//             sensor_formatted->esc->current_motor = __builtin_bswap16(*sensor->esc[XBUS_ESC_CURRENT] * 100);
-//         if (sensor->esc[XBUS_ESC_TEMPERATURE_BEC])
-//             sensor_formatted->esc->temp_bec = __builtin_bswap16(*sensor->esc[XBUS_ESC_TEMPERATURE_BEC] * 10);
-//         break;
-//     }
-//     case XBUS_BATTERY_ID:
-//     {
-//         sensor_formatted->battery->current_a = __builtin_bswap16(*sensor->esc[XBUS_BATTERY_CURRENT1] * 10);
-//         break;
-//     }
-//     case XBUS_VARIO_ID:
-//     {
-//         sensor_formatted->vario->altitude = __builtin_bswap16(*sensor->vario[XBUS_VARIO_ALTITUDE] * 10);
-//         sensor_formatted->vario->delta_1000ms = __builtin_bswap16(*sensor->vario[XBUS_VARIO_VSPEED]);
-//         break;
-//     }
-//     case XBUS_RPMVOLTTEMP_ID:
-//     {
-//         if (sensor->rpm_volt_temp[XBUS_RPMVOLTTEMP_VOLT])
-//             sensor_formatted->rpm_volt_temp->volts = __builtin_bswap16(*sensor->rpm_volt_temp[XBUS_RPMVOLTTEMP_VOLT] * 100);
-//         if (sensor->rpm_volt_temp[XBUS_RPMVOLTTEMP_TEMP])
-//             sensor_formatted->rpm_volt_temp->temperature = __builtin_bswap16(*sensor->rpm_volt_temp[XBUS_RPMVOLTTEMP_TEMP]);
-//         break;
-//     }
-    }
-}// end xbus_format_sensor
-
-// void i2c_stop_handler(uint8_t length)
-// {
-//     //sprintf(str_out, "\nTotal bytes: %u", length);
-//     //Serial.print(str_out);
-//     printf("Total bytes: %u \n", str_out) ;
-// }
-
-static void runXbusRequest()
-{
-    uint8_t buffer[64];
-    if (!fields[NUMSAT].available) return;
-    handleXbus(XBUS_GPS_LOC_ID);
-    //i2c_write_raw_blocking(i2c0,buffer,sizeof(buffer));// à valider
-     i2c_write_blocking(i2c0, XBUS_GPS_LOC_ID, buffer, sizeof(buffer), false); 
-}
-/*
-static void i2c_request_handler(uint8_t address)
-{
-    // printf("\nAddress: %X, request...", address);
-    uint8_t buffer[64];
-
-    switch (address)
-    {
-    case XBUS_AIRSPEED_ID:
-    {
-    //     if (!sensor->is_enabled[XBUS_AIRSPEED])
-    //         break;
-    //     xbus_format_sensor(address);
-    //     i2c_multi_set_write_buffer((uint8_t *)sensor_formatted->airspeed);
-    //     // vTaskResume(led_task_handle);
-    //     // if (debug)
-    //     //     {printf("\nXBUS (%u) > ", uxTaskGetStackHighWaterMark(receiver_task_handle));
-    //     // uint8_t buffer[sizeof(xbus_airspeed_t)];
-    //     // memcpy(buffer, sensor_formatted->airspeed, sizeof(xbus_airspeed_t));
-    //     // for (int i = 0; i < sizeof(xbus_airspeed_t); i++)
-    //     // {
-    //     //     printf("%X ", buffer[i]);
-    //     // }}
-    //     break;
-    // }
-    // case XBUS_ALTIMETER_ID:
-    // {
-    //     if (!sensor->is_enabled[XBUS_ALTIMETER])
-    //         break;
-    //     break;
-    // }
-    case XBUS_GPS_LOC_ID:
-    {
-        if (!fields[NUMSAT].available)
-            break;
-        xbus_format_sensor(address);
-        //i2c_multi_set_write_buffer(buffer);
-        // vTaskResume(led_task_handle);
-        // if (debug)
-        //    { printf("\nXBUS (%u) > ", uxTaskGetStackHighWaterMark(receiver_task_handle));
-        // uint8_t buffer[sizeof(xbus_gps_loc_t)];
-        // memcpy(buffer, sensor_formatted->gps_loc, sizeof(xbus_gps_loc_t));
-        // for (int i = 0; i < sizeof(xbus_gps_loc_t); i++)
-        // {
-        //     printf("%X ", buffer[i]);
-        // }}
-        break;
-    }
-    case XBUS_GPS_STAT_ID:
-    {
-        if (!fields[NUMSAT].available)
-            break;
-        xbus_format_sensor(address);
-        //i2c_multi_set_write_buffer(buffer);
-        // vTaskResume(led_task_handle);
-        // if (debug)
-        // {
-        //     printf("\nXBUS (%u) > ", uxTaskGetStackHighWaterMark(receiver_task_handle));
-        //     uint8_t buffer[sizeof(xbus_gps_stat_t)];
-        //     memcpy(buffer, sensor_formatted->gps_stat, sizeof(xbus_gps_stat_t));
-        //     for (int i = 0; i < sizeof(xbus_gps_stat_t); i++)
-        //     {
-        //         printf("%X ", buffer[i]);
-        //     }
-        // }
-        break;
-    }
-//     case XBUS_ESC_ID:
-//     {
-//         if (!sensor->is_enabled[XBUS_ESC])
-//             break;
-//         xbus_format_sensor(address);
-//         i2c_multi_set_write_buffer((uint8_t *)sensor_formatted->esc);
-//         // vTaskResume(led_task_handle);
-//         // if (debug)
-//         //    { printf("\nXBUS (%u) > ", uxTaskGetStackHighWaterMark(receiver_task_handle));
-//         // uint8_t buffer[sizeof(xbus_esc_t)];
-//         // memcpy(buffer, sensor_formatted->esc, sizeof(xbus_esc_t));
-//         // for (int i = 0; i < sizeof(xbus_esc_t); i++)
-//         // {
-//         //     printf("%X ", buffer[i]);
-//         // }}
-//         break;
-//     }
-//     case XBUS_BATTERY_ID:
-//     {
-//         if (!sensor->is_enabled[XBUS_BATTERY])
-//             break;
-//         xbus_format_sensor(address);
-//         i2c_multi_set_write_buffer((uint8_t *)sensor_formatted->battery);
-//         // vTaskResume(led_task_handle);
-//         // if (debug)
-//         // {
-//         //     printf("\nXBUS (%u) > ", uxTaskGetStackHighWaterMark(receiver_task_handle));
-//         //     uint8_t buffer[sizeof(xbus_battery_t)];
-//         //     memcpy(buffer, sensor_formatted->battery, sizeof(xbus_battery_t));
-//         //     for (int i = 0; i < sizeof(xbus_battery_t); i++)
-//         //     {
-//         //         printf("%X ", buffer[i]);
-//         //     }
-//         // }
-//         break;
-//     }
-//     case XBUS_VARIO_ID:
-//     {
-//         if (!sensor->is_enabled[XBUS_VARIO])
-//             break;
-//         xbus_format_sensor(address);
-//         i2c_multi_set_write_buffer((uint8_t *)sensor_formatted->vario);
-//         // vTaskResume(led_task_handle);
-//         // if (debug)
-//         //     {printf("\nXBUS (%u) > ", uxTaskGetStackHighWaterMark(receiver_task_handle));
-//         // uint8_t buffer[sizeof(xbus_vario_t)];
-//         // memcpy(buffer, sensor_formatted->vario, sizeof(xbus_vario_t));
-//         // for (int i = 0; i < sizeof(xbus_vario_t); i++)
-//         // {
-//         //     printf("%X ", buffer[i]);
-//         // }}
-//         break;
-//     }
-//     case XBUS_RPMVOLTTEMP_ID:
-//     {
-//         if (!sensor->is_enabled[XBUS_RPMVOLTTEMP])
-//             break;
-//         xbus_format_sensor(address);
-//         i2c_multi_set_write_buffer((uint8_t *)sensor_formatted->rpm_volt_temp);
-//         // vTaskResume(led_task_handle);
-//         // if (debug)
-//         //   {  printf("\nXBUS (%u) > ", uxTaskGetStackHighWaterMark(receiver_task_handle));
-//         // uint8_t buffer[sizeof(xbus_rpm_volt_temp_t)];
-//         // memcpy(buffer, sensor_formatted->rpm_volt_temp, sizeof(xbus_rpm_volt_temp_t));
-//         // for (int i = 0; i < sizeof(xbus_rpm_volt_temp_t); i++)
-//         // {
-//         //     printf("%X ", buffer[i]);
-//         // }}
-//         break;
-        }
-    }
-}// end i2c_request_handler
-*/
-
-static void set_config()
-{
-    //config_t *config = config_read();
-    //TaskHandle_t task_handle;
-/*
-    if (config->esc_protocol == ESC_PWM)
-    {
-        esc_pwm_parameters_t parameter = {config->rpm_multiplier, config->alpha_rpm, malloc(sizeof(float))};
-        // xTaskCreate(esc_pwm_task, "esc_pwm_task", STACK_ESC_PWM, (void *)&parameter, 2, &task_handle);
-        // xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-        sensor->esc[XBUS_ESC_RPM] = parameter.rpm;
-        sensor->is_enabled[XBUS_ESC] = true;
-        sensor_formatted->esc = malloc(sizeof(xbus_esc_t));
-        *sensor_formatted->esc = (xbus_esc_t){XBUS_ESC_ID, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        i2c_multi_enable_address(XBUS_ESC_ID);
-
-        //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    }
-    if (config->esc_protocol == ESC_HW3)
-    {
-        esc_hw3_parameters_t parameter = {config->rpm_multiplier, config->alpha_rpm, malloc(sizeof(float))};
-        // xTaskCreate(esc_hw3_task, "esc_hw3_task", STACK_ESC_HW3, (void *)&parameter, 2, &task_handle);
-        // uart1_notify_task_handle = task_handle;
-        // xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-        sensor->esc[XBUS_ESC_RPM] = parameter.rpm;
-        sensor->is_enabled[XBUS_ESC] = true;
-        sensor_formatted->esc = malloc(sizeof(xbus_esc_t));
-        *sensor_formatted->esc = (xbus_esc_t){XBUS_ESC_ID, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        i2c_multi_enable_address(XBUS_ESC_ID);
-
-        //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    }
-    if (config->esc_protocol == ESC_HW4)
-    {
-        esc_hw4_parameters_t parameter = {config->rpm_multiplier, config->enable_pwm_out,
-                                          config->alpha_rpm, config->alpha_voltage, config->alpha_current, config->alpha_temperature, config->esc_hw4_divisor, config->esc_hw4_ampgain, config->esc_hw4_current_thresold, config->esc_hw4_current_max,
-                                          malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(uint8_t))};
-        // xTaskCreate(esc_hw4_task, "esc_hw4_task", STACK_ESC_HW4, (void *)&parameter, 2, &task_handle);
-        // uart1_notify_task_handle = task_handle;
-        // xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-        // ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        // if (config->enable_pwm_out)
-        // {
-        //     xTaskCreate(pwm_out_task, "pwm_out", STACK_PWM_OUT, (void *)parameter.rpm, 2, &task_handle);
-        //     pwm_out_task_handle = task_handle;
-        //     xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-        //     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        // }
-        sensor->esc[XBUS_ESC_RPM] = parameter.rpm;
-        sensor->esc[XBUS_ESC_VOLTAGE] = parameter.voltage;
-        sensor->esc[XBUS_ESC_CURRENT] = parameter.current;
-        sensor->esc[XBUS_ESC_TEMPERATURE_FET] = parameter.temperature_fet;
-        sensor->esc[XBUS_ESC_TEMPERATURE_BEC] = parameter.temperature_bec;
-        sensor->is_enabled[XBUS_ESC] = true;
-        sensor_formatted->esc = malloc(sizeof(xbus_esc_t));
-        *sensor_formatted->esc = (xbus_esc_t){XBUS_ESC_ID, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        //i2c_multi_enable_address(XBUS_ESC_ID);
-    }
-    if (config->esc_protocol == ESC_CASTLE)
-    {
-        esc_castle_parameters_t parameter = {config->rpm_multiplier,
-                                             config->alpha_rpm, config->alpha_voltage, config->alpha_current, config->alpha_temperature,
-                                             malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(uint8_t))};
-        //xTaskCreate(esc_castle_task, "esc_castle_task", STACK_ESC_CASTLE, (void *)&parameter, 2, &task_handle);
-        //xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-        sensor->esc[XBUS_ESC_RPM] = parameter.rpm;
-        sensor->esc[XBUS_ESC_VOLTAGE] = parameter.voltage;
-        sensor->esc[XBUS_ESC_CURRENT] = parameter.current;
-        sensor->esc[XBUS_ESC_TEMPERATURE_FET] = parameter.temperature;
-        sensor->is_enabled[XBUS_ESC] = true;
-        sensor_formatted->esc = malloc(sizeof(xbus_esc_t));
-        *sensor_formatted->esc = (xbus_esc_t){XBUS_ESC_ID, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        i2c_multi_enable_address(XBUS_ESC_ID);
-
-        //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    }
-    if (config->esc_protocol == ESC_KONTRONIK)
-    {
-        esc_kontronik_parameters_t parameter = {config->rpm_multiplier,
-                                                config->alpha_rpm, config->alpha_voltage, config->alpha_current, config->alpha_temperature,
-                                                malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(uint8_t))};
-        //xTaskCreate(esc_kontronik_task, "esc_kontronik_task", STACK_ESC_KONTRONIK, (void *)&parameter, 2, &task_handle);
-        //uart1_notify_task_handle = task_handle;
-        //xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-
-        sensor->esc[XBUS_ESC_RPM] = parameter.rpm;
-        sensor->esc[XBUS_ESC_VOLTAGE] = parameter.voltage;
-        sensor->esc[XBUS_ESC_CURRENT] = parameter.current;
-        sensor->esc[XBUS_ESC_TEMPERATURE_FET] = parameter.temperature_fet;
-        sensor->esc[XBUS_ESC_TEMPERATURE_BEC] = parameter.temperature_bec;
-        sensor->is_enabled[XBUS_ESC] = true;
-        sensor_formatted->esc = malloc(sizeof(xbus_esc_t));
-        *sensor_formatted->esc = (xbus_esc_t){XBUS_ESC_ID, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        i2c_multi_enable_address(XBUS_ESC_ID);
-
-        //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    }
-    if (config->esc_protocol == ESC_APD_F)
-    {
-        esc_apd_f_parameters_t parameter = {config->rpm_multiplier,
-                                            config->alpha_rpm, config->alpha_voltage, config->alpha_current, config->alpha_temperature,
-                                            malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(uint8_t))};
-        //xTaskCreate(esc_apd_f_task, "esc_apd_f_task", STACK_ESC_APD_F, (void *)&parameter, 2, &task_handle);
-        //uart1_notify_task_handle = task_handle;
-        //xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-
-        sensor->esc[XBUS_ESC_RPM] = parameter.rpm;
-        sensor->esc[XBUS_ESC_VOLTAGE] = parameter.voltage;
-        sensor->esc[XBUS_ESC_CURRENT] = parameter.current;
-        sensor->esc[XBUS_ESC_TEMPERATURE_FET] = parameter.temperature;
-        sensor->is_enabled[XBUS_ESC] = true;
-        sensor_formatted->esc = malloc(sizeof(xbus_esc_t));
-        *sensor_formatted->esc = (xbus_esc_t){XBUS_ESC_ID, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        i2c_multi_enable_address(XBUS_ESC_ID);
-
-        //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    }
-    if (config->esc_protocol == ESC_APD_HV)
-    {
-        esc_apd_hv_parameters_t parameter = {config->rpm_multiplier,
-                                             config->alpha_rpm, config->alpha_voltage, config->alpha_current, config->alpha_temperature,
-                                             malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(uint8_t))};
-        //xTaskCreate(esc_apd_hv_task, "esc_apd_hv_task", STACK_ESC_APD_HV, (void *)&parameter, 2, &task_handle);
-        //uart1_notify_task_handle = task_handle;
-        //xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-
-        sensor->esc[XBUS_ESC_RPM] = parameter.rpm;
-        sensor->esc[XBUS_ESC_VOLTAGE] = parameter.voltage;
-        sensor->esc[XBUS_ESC_CURRENT] = parameter.current;
-        sensor->esc[XBUS_ESC_TEMPERATURE_FET] = parameter.temperature;
-        sensor->is_enabled[XBUS_ESC] = true;
-        sensor_formatted->esc = malloc(sizeof(xbus_esc_t));
-        *sensor_formatted->esc = (xbus_esc_t){XBUS_ESC_ID, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        i2c_multi_enable_address(XBUS_ESC_ID);
-
-        //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    }
-*/
-    if (fields[NUMSAT].available)
-    {
-        // nmea_parameters_t parameter = {config->gps_baudrate,
-        //                                malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)),
-        //                                malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float))};
-        //xTaskCreate(nmea_task, "nmea_task", STACK_GPS, (void *)&parameter, 2, &task_handle);
-        //uart_pio_notify_task_handle = task_handle;
-
-        sensor->gps_loc[XBUS_GPS_LOC_ALTITUDE] = 0;
-        sensor->gps_loc[XBUS_GPS_LOC_LATITUDE] = 0;
-        sensor->gps_loc[XBUS_GPS_LOC_LONGITUDE] = 0;
-        sensor->gps_loc[XBUS_GPS_LOC_COURSE] = 0;
-        sensor->gps_loc[XBUS_GPS_LOC_HDOP] = 0;
-        sensor->gps_stat[XBUS_GPS_STAT_SPEED] = 0;
-        sensor->gps_stat[XBUS_GPS_STAT_TIME] = 0;
-        sensor->gps_stat[XBUS_GPS_STAT_SATS] = 0;
-        sensor->gps_stat[XBUS_GPS_STAT_ALTITUDE] = 0;
-        sensor->is_enabled[XBUS_GPS_LOC] = true;
-        sensor->is_enabled[XBUS_GPS_STAT] = true;
-        //sensor_formatted->gps_loc = calloc(1,16);
-        *sensor_formatted->gps_loc = (xbus_gps_loc_t){XBUS_GPS_LOC_ID, 0, 0, 0, 0, 0, 0, 0};
-        //sensor_formatted->gps_stat = malloc(sizeof(xbus_gps_stat_t));
-        *sensor_formatted->gps_stat = (xbus_gps_stat_t){XBUS_GPS_STAT_ID, 0, 0, 0, 0, 0};
-        // i2c_multi_enable_address(XBUS_GPS_LOC_ID);
-        // i2c_multi_enable_address(XBUS_GPS_STAT_ID);
-
-        //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    }
-    // if (config->enable_analog_voltage)
-    // {
-    //     voltage_parameters_t parameter = {0, config->alpha_voltage, config->analog_voltage_multiplier, malloc(sizeof(float))};
-    //     //xTaskCreate(voltage_task, "voltage_task", STACK_VOLTAGE, (void *)&parameter, 2, &task_handle);
-    //     //xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-
-    //     sensor->rpm_volt_temp[XBUS_RPMVOLTTEMP_VOLT] = parameter.voltage;
-    //     sensor->is_enabled[XBUS_RPMVOLTTEMP] = true;
-    //     sensor_formatted->rpm_volt_temp = malloc(sizeof(xbus_rpm_volt_temp_t));
-    //     *sensor_formatted->rpm_volt_temp = (xbus_rpm_volt_temp_t){XBUS_RPMVOLTTEMP_ID, 0, 0, 0, 0};
-    //     i2c_multi_enable_address(XBUS_RPMVOLTTEMP_ID);
-
-    //     //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // }
-    // if (config->enable_analog_current)
-    // {
-    //     current_parameters_t parameter = {1, config->alpha_current, config->analog_current_multiplier, config->analog_current_offset, config->analog_current_autoffset, malloc(sizeof(float)), malloc(sizeof(float))};
-    //     //xTaskCreate(current_task, "current_task", STACK_CURRENT, (void *)&parameter, 2, &task_handle);
-    //     //xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-
-    //     sensor->battery[XBUS_BATTERY_CURRENT1] = parameter.current;
-    //     sensor->is_enabled[XBUS_BATTERY] = true;
-    //     sensor_formatted->battery = malloc(sizeof(xbus_battery_t));
-    //     *sensor_formatted->battery = (xbus_battery_t){XBUS_BATTERY_ID, 0, 0, 0, 0, 0, 0, 0};
-    //     i2c_multi_enable_address(XBUS_BATTERY_ID);
-
-    //     //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // }
-    // if (config->enable_analog_ntc)
-    // {
-    //     ntc_parameters_t parameter = {2, config->alpha_temperature, malloc(sizeof(float))};
-    //     //xTaskCreate(ntc_task, "ntc_task", STACK_NTC, (void *)&parameter, 2, &task_handle);
-    //     //xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-
-    //     sensor->rpm_volt_temp[XBUS_RPMVOLTTEMP_TEMP] = parameter.ntc;
-    //     sensor->is_enabled[XBUS_RPMVOLTTEMP] = true;
-    //     sensor_formatted->rpm_volt_temp = malloc(sizeof(xbus_rpm_volt_temp_t));
-    //     *sensor_formatted->rpm_volt_temp = (xbus_rpm_volt_temp_t){XBUS_RPMVOLTTEMP_ID, 0, 0, 0, 0};
-    //     i2c_multi_enable_address(XBUS_RPMVOLTTEMP_ID);
-    //     //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // }
-    // if (config->enable_analog_airspeed)
-    // {
-    //     airspeed_parameters_t parameter = {3, config->alpha_airspeed, malloc(sizeof(float))};
-    //     //xTaskCreate(airspeed_task, "airspeed_task", STACK_AIRSPEED, (void *)&parameter, 2, &task_handle);
-    //     //xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-
-    //     sensor->airspeed[XBUS_AIRSPEED_AIRSPEED] = parameter.airspeed;
-    //     sensor->is_enabled[XBUS_AIRSPEED] = true;
-    //     sensor_formatted->airspeed = malloc(sizeof(xbus_airspeed_t));
-    //     *sensor_formatted->airspeed = (xbus_airspeed_t){XBUS_AIRSPEED_ID, 0, 0, 0};
-    //     i2c_multi_enable_address(XBUS_AIRSPEED_ID);
-
-    //     //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // }
-    // if (config->i2c_module == I2C_BMP280)
-    // {
-    //     bmp280_parameters_t parameter = {config->alpha_vario, config->vario_auto_offset, config->i2c_address, config->bmp280_filter, malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float))};
-    //     //xTaskCreate(bmp280_task, "bmp280_task", STACK_BMP280, (void *)&parameter, 2, &task_handle);
-    //     //xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-
-    //     sensor->vario[XBUS_VARIO_ALTITUDE] = parameter.altitude;
-    //     // sensor->vario[XBUS_VARIO_SPEED] = parameter.speed;
-    //     sensor->is_enabled[XBUS_VARIO] = true;
-    //     sensor_formatted->vario = malloc(sizeof(xbus_vario_t));
-    //     *sensor_formatted->vario = (xbus_vario_t){XBUS_VARIO_ID, 0, 0, 0, 0, 0, 0, 0, 0};
-    //     i2c_multi_enable_address(XBUS_VARIO_ID);
-
-    //     //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // }
-    // if (config->i2c_module == I2C_MS5611)
-    // {
-    //     ms5611_parameters_t parameter = {config->alpha_vario, config->vario_auto_offset, config->i2c_address, malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float))};
-    //     //xTaskCreate(ms5611_task, "ms5611_task", STACK_MS5611, (void *)&parameter, 2, &task_handle);
-    //     //xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-
-    //     sensor->vario[XBUS_VARIO_ALTITUDE] = parameter.altitude;
-    //     sensor->vario[XBUS_VARIO_VSPEED] = parameter.vspeed;
-    //     sensor->is_enabled[XBUS_VARIO] = true;
-    //     sensor_formatted->vario = malloc(sizeof(xbus_vario_t));
-    //     *sensor_formatted->vario = (xbus_vario_t){XBUS_VARIO_ID, 0, 0, 0, 0, 0, 0, 0, 0};
-    //     i2c_multi_enable_address(XBUS_VARIO_ID);
-
-    //     //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // }
-    // if (config->i2c_module == I2C_BMP180)
-    // {
-    //     bmp180_parameters_t parameter = {config->alpha_vario, config->vario_auto_offset, config->i2c_address, malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float)), malloc(sizeof(float))};
-    //     //xTaskCreate(bmp180_task, "bmp180_task", STACK_BMP180, (void *)&parameter, 2, &task_handle);
-    //     //xQueueSendToBack(tasks_queue_handle, task_handle, 0);
-
-    //     sensor->vario[XBUS_VARIO_ALTITUDE] = parameter.altitude;
-    //     sensor->vario[XBUS_VARIO_VSPEED] = parameter.vspeed;
-    //     sensor->is_enabled[XBUS_VARIO] = true;
-    //     sensor_formatted->vario = malloc(sizeof(xbus_vario_t));
-    //     *sensor_formatted->vario = (xbus_vario_t){XBUS_VARIO_ID, 0, 0, 0, 0, 0, 0, 0, 0};
-    //     i2c_multi_enable_address(XBUS_VARIO_ID);
-
-    //     //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // }
-    // if (config->xbus_clock_stretch)
-    // {
-    //     gpio_set_dir(CLOCK_STRETCH_GPIO, true);
-    //     gpio_put(CLOCK_STRETCH_GPIO, false);
-    // }
+static void publish(uint8_t idx, const uint8_t *packet) {
+    // callback and handleXbus run on core0; keep the snapshot atomic to IRQ.
+    const uint32_t state = save_and_disable_interrupts();
+    memcpy(published[idx], packet, kPacketLength);
+    restore_interrupts(state);
 }
 
-uint8_t bcd8(float value, uint8_t precision)
-{
-    char buf[10] = {0};
-    uint8_t output = 0;
-    for (int i = 0; i < precision; i++)
-        value = value * 10;
-    sprintf(buf, "%02i", (uint8_t)value);
-    for (int i = 0; i < 2; i++)
-        output |= (buf[i] - 48) << ((1 - i) * 4);
-    return output;
+template <typename T> static void publishStruct(uint8_t idx, const T &s) {
+    static_assert(sizeof(T) <= kPacketLength, "SRXL2 payload larger than X-Bus frame");
+    uint8_t packet[kPacketLength];
+    memset(packet, 0xff, sizeof(packet));
+    memcpy(packet, &s, sizeof(s));
+    publish(idx, packet);
 }
 
-uint16_t bcd16(float value, uint8_t precision)
-{
-    char buf[10] = {0};
-    uint16_t output = 0;
-    for (int i = 0; i < precision; i++)
-        value = value * 10;
-    sprintf(buf, "%04i", (uint16_t)value);
-    for (int i = 0; i < 4; i++)
-        output |= (uint16_t)(buf[i] - 48) << ((3 - i) * 4);
-    return output;
+static void formatAll() {
+    // Payload formats / IDs come from the existing oXs SRXL2 source.
+    STRU_TELE_SPEED air{};
+    air.identifier = TELE_DEVICE_AIRSPEED;
+    air.sID = 0;
+    air.airspeed = has(AIRSPEED) ? be16(clamped(roundDiv(int64_t(val(AIRSPEED)) * 36, 1000), 0, 65534)) : 0xffff;
+    air.maxAirspeed = 0xffff;
+    publishStruct(AIR, air);
+
+    STRU_TELE_GPS_LOC loc{};
+    loc.identifier = TELE_DEVICE_GPS_LOC;
+    loc.sID = 0;
+    uint8_t gpsFlags = 0;
+    if (has(LATITUDE)) loc.latitude = bcdCoordinate(val(LATITUDE), false, gpsFlags);
+    if (has(LONGITUDE)) loc.longitude = bcdCoordinate(val(LONGITUDE), true, gpsFlags);
+    uint32_t altitudeDecimeters = 0;
+    if (has(ALTITUDE)) {
+        const int64_t cm = val(ALTITUDE);
+        if (cm < 0) gpsFlags |= GPS_INFO_FLAGS_NEGATIVE_ALT;
+        altitudeDecimeters = static_cast<uint32_t>((cm < 0 ? -cm : cm) / 10);
+        loc.altitudeLow = static_cast<uint16_t>(bcd(altitudeDecimeters % 10000));
+    }
+    if (has(HEADING)) loc.course = static_cast<uint16_t>(bcd(clamped(roundDiv(val(HEADING), 10), 0, 3599)));
+    if (has(GPS_PDOP)) loc.HDOP = static_cast<uint8_t>(bcd(clamped(roundDiv(val(GPS_PDOP), 10), 0, 99)));
+    if (has(NUMSAT) && val(NUMSAT) > 0) {
+        gpsFlags |= GPS_INFO_FLAGS_GPS_DATA_RECEIVED;
+        if (val(NUMSAT) >= 4) gpsFlags |= GPS_INFO_FLAGS_GPS_FIX_VALID | GPS_INFO_FLAGS_3D_FIX;
+    }
+    loc.GPSflags = gpsFlags;
+    publishStruct(GPS_LOC, loc);
+
+    STRU_TELE_GPS_STAT stat{};
+    stat.identifier = TELE_DEVICE_GPS_STATS;
+    stat.sID = 0;
+    // speed: cm/s -> 0.1 knots (0.1943844 units per cm/s).
+    if (has(GROUNDSPEED)) stat.speed = static_cast<uint16_t>(bcd(clamped(roundDiv(int64_t(val(GROUNDSPEED)) * 194384LL, 1000000), 0, 9999)));
+    if (has(GPS_TIME)) {
+        const uint32_t t = static_cast<uint32_t>(val(GPS_TIME));
+        const uint32_t hh = bcd((t >> 24) & 0xff);
+        const uint32_t mm = bcd((t >> 16) & 0xff);
+        const uint32_t ss = bcd((t >> 8) & 0xff);
+        stat.UTC = (hh << 24) | (mm << 16) | (ss << 8);
+    }
+    if (has(NUMSAT)) stat.numSats = static_cast<uint8_t>(bcd(clamped(val(NUMSAT) % 100, 0, 99)));
+    stat.altitudeHigh = static_cast<uint8_t>(bcd(clamped(altitudeDecimeters / 10000, 0, 99)));
+    stat.notUsed1 = stat.notUsed2 = stat.notUsed3 = 0xffff;
+    publishStruct(GPS_STAT, stat);
+
+    STRU_TELE_RX_MAH energy{};
+    energy.identifier = TELE_DEVICE_RX_MAH;
+    energy.sID = 0;
+    energy.current_A = has(CURRENT) ? static_cast<int16_t>(be16(clamped(roundDiv(val(CURRENT), 10), -32766, 32766))) : static_cast<int16_t>(0x7fff);
+    // This field is in tenths of mAh, nominally limited to 3276.6mAh.
+    // FVP's 34321 mAh is saturated, NOT wrapped (highCharge extension TODO).
+    energy.chargeUsed_A = has(CAPACITY) ? be16(clamped(int64_t(val(CAPACITY)) * 10, 0, 32766)) : 0xffff;
+    energy.volts_A = has(MVOLT) ? be16(clamped(roundDiv(val(MVOLT), 10), 0, 65534)) : 0xffff;
+    energy.current_B = static_cast<int16_t>(0x7fff);
+    energy.chargeUsed_B = 0xffff;
+    energy.volts_B = 0xffff;
+    energy.alerts = energy.highCharge = 0;
+    publishStruct(ENERGY, energy);
+
+    STRU_TELE_ESC esc{};
+    esc.identifier = TELE_DEVICE_ESC;
+    esc.sID = 0;
+    esc.RPM = has(RPM) && val(RPM) > 0 ? be16(clamped(roundDiv(int64_t(val(RPM)) * 60, 10), 0, 65534)) : 0xffff;
+    esc.voltsInput = has(MVOLT) ? be16(clamped(roundDiv(val(MVOLT), 10), 0, 65534)) : 0xffff;
+    esc.tempFET = has(TEMP1) ? be16(clamped(int64_t(val(TEMP1)) * 10, 0, 65534)) : 0xffff;
+    esc.currentMotor = has(CURRENT) ? be16(clamped(roundDiv(val(CURRENT), 10), 0, 65534)) : 0xffff;
+    esc.tempBEC = has(TEMP2) ? be16(clamped(int64_t(val(TEMP2)) * 10, 0, 65534)) : 0xffff;
+    esc.currentBEC = esc.voltsBEC = esc.throttle = esc.powerOut = 0xff;
+    publishStruct(ESC, esc);
+
+    STRU_TELE_VARIO_S vario{};
+    vario.identifier = TELE_DEVICE_VARIO_S;
+    vario.sID = 0;
+    vario.altitude = has(RELATIVEALT) ? static_cast<int16_t>(be16(clamped(roundDiv(val(RELATIVEALT), 10), -32766, 32766))) : static_cast<int16_t>(0x7fff);
+    // In the 0.1 m/s delta fields, use the current vertical-speed estimate
+    // only in the 1s slot; historic 250/500/1500/... deltas are not known.
+    vario.delta_0250ms = vario.delta_0500ms = static_cast<int16_t>(0x7fff);
+    vario.delta_1000ms = has(VSPEED) ? static_cast<int16_t>(be16(clamped(roundDiv(val(VSPEED), 10), -32766, 32766))) : static_cast<int16_t>(0x7fff);
+    vario.delta_1500ms = vario.delta_2000ms = vario.delta_3000ms = static_cast<int16_t>(0x7fff);
+    publishStruct(VARIO_IDX, vario);
+
+    STRU_TELE_RPM rpm{};
+    rpm.identifier = TELE_DEVICE_RPM;
+    rpm.sID = 0;
+    rpm.microseconds = has(RPM) && val(RPM) > 0 ? be16(clamped(roundDiv(1000000LL, val(RPM)), 1, 65534)) : 0xffff;
+    rpm.volts = has(MVOLT) ? be16(clamped(roundDiv(val(MVOLT), 10), 0, 65534)) : 0xffff;
+    rpm.temperature = has(TEMP1) ? static_cast<int16_t>(be16(clamped(roundDiv(int64_t(val(TEMP1)) * 9, 5) + 32, -32766, 32766))) : static_cast<int16_t>(0x7fff);
+    rpm.dBm_A = rpm.dBm_B = 0;
+    rpm.spare[0] = rpm.spare[1] = 0xffff;
+    publishStruct(RPM_TEMP, rpm);
+}
+} // namespace
+
+void setupXbusSpektrum() {
+    if (config.protocol != 'X' || config.pinTlm == 255 || config.pinPrimIn == 255) return;
+    if (config.pinTlm + 1 != config.pinPrimIn || config.pinTlm > 28) {
+        printf("[XBUS] Expected TLM=SDA and PRI=SCL=TLM+1; abort.\n");
+        return;
+    }
+    // Proof-of-concept uses all 4 SMs/IRQs on PIO0. Do not collide with
+    // SBUS-out (SM2), ESC PIO reception (SM3) or PIO0 PWM/other users.
+    if (config.pinSbusOut != 255 || config.pinEsc != 255) {
+        printf("[XBUS] PIO0 conflict: disable SBUS_OUT and ESC for this test.\n");
+        return;
+    }
+    for (uint8_t i = 0; i < 7; ++i) {
+        memset(published[i], 0xff, kPacketLength);
+        published[i][0] = ids[i];
+        published[i][1] = 0;
+    }
+    memset(tx, 0xff, sizeof(tx));
+    formatAll();
+    i2c_multi_init(pio0, config.pinTlm);
+    i2c_multi_set_request_handler(request);
+    for (uint8_t i = 0; i < 7; ++i) i2c_multi_enable_address(ids[i]);
+    ready = true;
+    printf("[XBUS] PIO0 SDA=GP%u SCL=GP%u, 7 addresses enabled\n", config.pinTlm, config.pinPrimIn);
 }
 
-uint32_t bcd32(float value, uint8_t precision)
-{
-    char buf[10] = {0};
-    uint32_t output = 0;
-    for (int i = 0; i < precision; i++)
-        value = value * 10;
-    sprintf(buf, "%08li", (uint32_t)value);
-    for (int i = 0; i < 8; i++)
-        output |= (uint32_t)(buf[i] - 48) << ((7 - i) * 4);
-    return output;
+void handleXbusSpektrum() {
+    if (!ready) return;
+    const uint32_t now = millisRp();
+    if (now - lastUpdate >= kRefreshMs) {
+        lastUpdate = now;
+        formatAll();
+    }
+    if (debugTlm == 'Y' && now - lastDebug >= 2000) {
+        lastDebug = now;
+        printf("[XBUS] req: 11=%lu 16=%lu 17=%lu 18=%lu 20=%lu 40=%lu 7E=%lu\n",
+               (unsigned long)requests[AIR], (unsigned long)requests[GPS_LOC],
+               (unsigned long)requests[GPS_STAT], (unsigned long)requests[ENERGY],
+               (unsigned long)requests[ESC], (unsigned long)requests[VARIO_IDX],
+               (unsigned long)requests[RPM_TEMP]);
+    }
 }

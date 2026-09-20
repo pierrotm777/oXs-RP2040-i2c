@@ -18,8 +18,9 @@
 extern CONFIG config;
 //extern MS5611 baro1;    // class to handle MS5611; adress = 0x77 or 0x76
 extern VARIO vario1;
-
+extern uint8_t debugAccZ ; // use to print a debug msg to check the acc offsets
 extern queue_t qSendCmdToCore1;
+extern bool core1OrientationMPUDone;
 
 bool calibrateImuGyro ; // recalibrate the gyro or not at reset (avoid it after a watchdog reset)
 
@@ -38,7 +39,7 @@ uint8_t orientationZ; // idem for oaz and ogz
 int8_t signX;         // contains the sign (1 or -1 ) to apply to oax and ogx
 int8_t signY;         // idem for oay and ogy
 int8_t signZ;         // idem for oaz and ogz
-bool orientationIsWrong;  // flag to sat that orientation is wrong and so avoid any process od raw data
+bool orientationIsWrong;  // flag to say that orientation is wrong and so avoid any process of raw data
 
 const char* mpuOrientationNames[8] = {\
     "FRONT(X+)", "BACK(X-)", "LEFT(Y+)", "RIGHT(Y-)", "UP(Z+)", "DOWN(Z-)", "WRONG", "WRONG"};
@@ -64,7 +65,7 @@ int8_t orientationList[36][6] = {
 //float G_off[3] = { 70.0, -13.0, -9.0}; //raw offsets, determined for gyro at rest
 //float gscale = ((250./32768.0)*(PI/180.0));   //gyro default 250 LSB per d/s -> rad/s
 uint8_t accScaleCode ;
-float accScale1G ;  //divide by this to get number of g 
+float accScale1G ;  //divide raw value by this to get number of g 
 uint8_t gyroScaleCode ; 
 float gyroScaleDegree;  //   multiply adc by this to get °/s
 float gyroScaleRad;     //   multiply adc by this to get rad/s
@@ -78,8 +79,13 @@ float qh[4] = {1.0, 0.0, 0.0, 0.0};
 
 // Free parameters in the Mahony filter and fusion scheme,
 // Kp for proportional feedback, Ki for integral
-float Kp = 5.0; // in github.com/har-in-air/ESP32_IMU_BARO_GPS_VARIO.blob/master it is set on 10
-float Ki = 0.0;  // on same site, it is set on 0
+
+
+ 
+//float Kp1 = 5.0; // in github.com/har-in-air/ESP32_IMU_BARO_GPS_VARIO.blob/master it is set on 10
+//float Ki1 = 0.0;  // on same site, it is set on 0
+//float Kp2 = 5.0; // in github.com/har-in-air/ESP32_IMU_BARO_GPS_VARIO.blob/master it is set on 10
+//float Ki2 = 0.0;  // on same site, it is set on 0
 
 
 Quaternion qq;                // quaternion
@@ -179,20 +185,56 @@ void MPU::testDevicesOffsetX(){
     for (uint8_t i=0;i<16;i++) printf("%d\n", mpu6050.getRotationX()); // get 16 values
 }
 
-void MPU::calibrationHorizontalExecute()  // 
+uint8_t MPU::readAndGetGravity(){ // return index of orientation; return 6 in case of error
+    int16_t ax,ay,az ;
+    int16_t gx,gy,gz ;
+    // Start reading acceleration registers from register 0x3B for 14 bytes (acc, temp, gyro)
+    uint8_t val = 0x3B;
+    uint8_t buffer[14]; 
+    uint8_t idx = 6; 
+    if (i2c_write_timeout_us(i2c1, MPU6050_DEFAULT_ADDRESS, &val, 1, true,1000)<0) { // true to keep master control of bus
+        printf("Write error for MPU6050 orientation at 0X3B\n");
+        return idx;
+    }
+    if ( i2c_read_timeout_us(i2c1, MPU6050_DEFAULT_ADDRESS, buffer, 14, false, 3500) <0){
+        printf("Read error for MPU6050 orientation\n");
+        return idx;
+    }     
+    ax= (buffer[0] << 8 | buffer[1]);
+    ay= (buffer[2] << 8 | buffer[3]);
+    az= (buffer[4] << 8 | buffer[5]);
+    findGravity( ax , ay , az , idx);
+	return idx;
+}
+
+void MPU::orientationExecute(bool horizontal){ // try to find horizontal orientation (used for gyro learning process)
+	if (horizontal) {
+        config.mpuOrientationH = readAndGetGravity(); 
+    } else {
+        config.mpuOrientationV = readAndGetGravity(); 
+    }
+    core1OrientationMPUDone = true ; // says that test has been done
+}
+
+void MPU::usbOrientationHorizontalExecute()  // 
 {
+    uint8_t idx = readAndGetGravity(); // // read the Acc and detect which face is on the upper side 
+    if (idx > 5){
+         printf("Error during horizontal orientation: direction of gravity has not been found\n");
+         return;
+    }
+    printf("Upper face of MPU (when model is horizontal) is "); printf(mpuOrientationNames[idx]);
+    printf("\n");
+    config.mpuOrientationH =  idx ; // save the orientationH
+    printf("Horizontal orientation done: use SAVE command to save it\n");
+    setupOrientation();  // refresh the parameters linked to the orientation        
+}
+
+void MPU::gyroCalibrationExecute(){
     printf("Before calibration:");
     printConfigOffsets();
-    //            sleep_ms(1000); // wait that message is printed  
        
-    //uint8_t buf[] = {0x6B, 0x00};
-    //if ( i2c_write_timeout_us(i2c1, MPU6050_DEFAULT_ADDRESS , buf, 2, false,1000) <0) {
-    //    printf("Write error for msp6050 on begin of calibration\n");
-    //    return ;
-    //}
-    //sleep_us(100);
-    //mpu6050.initialize();
-    #define ACCEL_NUM_AVG_SAMPLES	1000
+    #define ACCEL_NUM_AVG_SAMPLES	100
 	
     int16_t ax,ay,az ;
     int16_t gx,gy,gz ;
@@ -202,13 +244,129 @@ void MPU::calibrationHorizontalExecute()  //
 	gxAccum = gyAccum = gzAccum = 0;
     axMin = ayMin = azMin = gxMin = gyMin = gzMin = 60000;
     axMax = ayMax = azMax = gxMax = gyMax = gzMax = -60000;  
-	// use a lower dlpf
-    //uint8_t buffer[2] = {MPU6050_RA_CONFIG , MPU6050_DLPF_BW_20};
-    //if( i2c_write_timeout_us(i2c1, MPU6050_DEFAULT_ADDRESS, &buffer[0], 2, false,3000)<0){ // true to keep master control of bus
-    //    printf("Write error for MPU6050 calibration DLPF\n");
-    //    return false;
-    //}   
-    //sleep_ms(10);
+	for (int inx = 0; inx < ACCEL_NUM_AVG_SAMPLES; inx++){
+        sleep_us(2000); // take 8 msec with dlpf = 20 ; 1900us when BW = 188
+        // Start reading acceleration registers from register 0x3B for 14 bytes (acc, temp, gyro)
+        uint8_t val = 0x3B;
+        uint8_t buffer[14]; 
+        if (i2c_write_timeout_us(i2c1, MPU6050_DEFAULT_ADDRESS, &val, 1, true,1000)<0) { // true to keep master control of bus
+            printf("Write error for MPU6050 calibration at 0X3B command for gyro calibration\n");
+            return;
+        }
+        if ( i2c_read_timeout_us(i2c1, MPU6050_DEFAULT_ADDRESS, buffer, 14, false, 3500) <0){
+            printf("Read error for MPU6050 gyro calibration\n");
+            return;
+        }     
+    //    ax= (buffer[0] << 8 | buffer[1]);
+    //    ay= (buffer[2] << 8 | buffer[3]);
+    //    az= (buffer[4] << 8 | buffer[5]);
+        gx= (buffer[8] << 8 | buffer[9]);
+        gy= (buffer[10] << 8 | buffer[11]);
+        gz= (buffer[12] << 8 | buffer[13]);
+    //    axAccum += (int32_t) ax;
+    //    ayAccum += (int32_t) ay;
+    //    azAccum += (int32_t) az;
+        gxAccum += (int32_t) gx;
+        gyAccum += (int32_t) gy;
+        gzAccum += (int32_t) gz;
+    //    if (ax < axMin) axMin = ax;
+    //    if (ay < ayMin) ayMin = ay;
+    //    if (az < azMin) azMin = az;
+    //    if (ax > axMax) axMax = ax;
+    //    if (ay > ayMax) ayMax = ay;
+    //    if (az > azMax) azMax = az;
+        if (gx < gxMin) gxMin = gx;
+        if (gy < gyMin) gyMin = gy;
+        if (gz < gzMin) gzMin = gz;
+        if (gx > gxMax) gxMax = gx;
+        if (gy > gyMax) gyMax = gy;
+        if (gz > gzMax) gzMax = gz;
+    }
+    // here we know the offsets but still have to identify the gravity, set mpuOrientationH and take gravity out of offset 
+    #define MAX_ACC_DIFF 500
+    //if (((axMax - axMin) > MAX_ACC_DIFF) or ((ayMax - ayMin) > MAX_ACC_DIFF) or ((azMax - azMin) > MAX_ACC_DIFF)) {
+    //    printf ("Error in IMU calibration: to much variations in the acceleration values\n");
+    //    return;
+    //}
+    #define MAX_GYRO_DIFF 200
+    if (((gxMax - gxMin) > MAX_GYRO_DIFF) or ((gyMax - gyMin) > MAX_GYRO_DIFF) or ((gzMax - gzMin) > MAX_GYRO_DIFF)) {
+        printf ("Error in gyro calibration: to much variations in the gyro rates values\n");
+        return;
+    }
+    //axAccum /= (ACCEL_NUM_AVG_SAMPLES);
+    //ayAccum /= (ACCEL_NUM_AVG_SAMPLES);
+    //azAccum /= (ACCEL_NUM_AVG_SAMPLES);
+    gxAccum /= (ACCEL_NUM_AVG_SAMPLES);
+	gyAccum /= (ACCEL_NUM_AVG_SAMPLES);
+	gzAccum /= (ACCEL_NUM_AVG_SAMPLES);
+    //uint8_t idx = 6; 
+    //findGravity( axAccum , ayAccum , azAccum , idx);
+	//switch (idx) {
+    //    case 0 :
+    //        axAccum -= (int32_t) accScale1G;
+    //        break;
+    //    case 1 :
+    //        axAccum += (int32_t) accScale1G;
+    //        break;
+    //    case 2 :
+    //        ayAccum -= (int32_t) accScale1G;
+    //        break;
+    //    case 3 :
+    //        ayAccum += (int32_t) accScale1G;
+    //        break;
+    //    case 4 :
+    //        azAccum -= (int32_t) accScale1G;
+    //        break;
+    //    case 5 :
+    //        azAccum += (int32_t) accScale1G;
+    //        break; 
+    //    case 6 :
+    //        printf("Error during calibration : gravity direction not found based on Accelerometer\n");
+    //        return;
+    //        break; 
+    //}
+    //printf("Upper face is "); printf(mpuOrientationNames[idx]); printf("\n"); 
+    //config.accOffsetX = (int16_t)(axAccum);
+	//config.accOffsetY = (int16_t)(ayAccum);
+	//config.accOffsetZ = (int16_t)(azAccum);
+    config.gyroOffsetX = (int16_t)(gxAccum);
+	config.gyroOffsetY = (int16_t)(gyAccum);
+	config.gyroOffsetZ = (int16_t)(gzAccum);
+    //config.mpuOrientationH =  idx ; // save the orientationH
+    printf("Acc & gyro offsets after new gyro calibration\n");
+    printConfigOffsets() ;
+    printf("Gyro calibration done: use SAVE command to save the config!!\n");
+    //setupOrientation();  // refresh the parameters linked to the orientation        
+}    
+    
+
+void MPU::usbOrientationVerticalExecute() {
+    uint8_t idx = readAndGetGravity(); // // read the Acc and detect which face is on the upper side 
+    if (idx > 5){
+         printf("Error during vertical orientation: direction of gravity has not been found\n");
+         return;
+    }
+    printf("Upper face (with nose up) is "); printf(mpuOrientationNames[idx]);
+    printf("\n");
+    config.mpuOrientationV =  idx ; // save the orientationV
+    printf("Vertical orientation done: use SAVE command to save it\n");
+    setupOrientation();  // refresh the parameters linked to the orientation        
+}
+
+void MPU::nextAccCalibrationExecute(){
+    int16_t ax,ay,az ;
+    int16_t gx,gy,gz ;
+	int32_t axAccum, ayAccum, azAccum , axMin , axMax , ayMin , ayMax , azMin , azMax;
+	axAccum = ayAccum = azAccum = 0;
+    int32_t gxAccum, gyAccum, gzAccum , gxMin , gxMax , gyMin , gyMax , gzMin , gzMax;
+	gxAccum = gyAccum = gzAccum = 0;
+    axMin = ayMin = azMin = gxMin = gyMin = gzMin = 60000;
+    axMax = ayMax = azMax = gxMax = gyMax = gzMax = -60000;  
+    if (calibAccCount == (200 -1)){
+        printf("Number of measurements reaches the limit of 100; use MPUCAL=S to stop calibration\n");
+        return;
+    }
+    printf("Start reading nr: %i\n", calibAccCount+1) ;
     for (int inx = 0; inx < ACCEL_NUM_AVG_SAMPLES; inx++){
         sleep_us(2000); // take 8 msec with dlpf = 20 ; 1900us when BW = 188
         // Start reading acceleration registers from register 0x3B for 14 bytes (acc, temp, gyro)
@@ -225,127 +383,35 @@ void MPU::calibrationHorizontalExecute()  //
         ax= (buffer[0] << 8 | buffer[1]);
         ay= (buffer[2] << 8 | buffer[3]);
         az= (buffer[4] << 8 | buffer[5]);
-        //printf("az=%.0f\n", (float) az ); 
-        gx= (buffer[8] << 8 | buffer[9]);
-        gy= (buffer[10] << 8 | buffer[11]);
-        gz= (buffer[12] << 8 | buffer[13]);
         axAccum += (int32_t) ax;
         ayAccum += (int32_t) ay;
         azAccum += (int32_t) az;
-        //printf("az=%.0f\n", (float) az ); 
-        gxAccum += (int32_t) gx;
-        gyAccum += (int32_t) gy;
-        gzAccum += (int32_t) gz;
         if (ax < axMin) axMin = ax;
         if (ay < ayMin) ayMin = ay;
         if (az < azMin) azMin = az;
         if (ax > axMax) axMax = ax;
         if (ay > ayMax) ayMax = ay;
         if (az > azMax) azMax = az;
-        if (gx < gxMin) gxMin = gx;
-        if (gy < gyMin) gyMin = gy;
-        if (gz < gzMin) gzMin = gz;
-        if (gx > gxMax) gxMax = gx;
-        if (gy > gyMax) gyMax = gy;
-        if (gz > gzMax) gzMax = gz;
+        //printf ("%i , %i, %i\n", ax, ay , az);
+        
     }
-    // here we know the offsets but still have to identify the gravity, set mpuOrientationH and take gravity out of offset 
+    // here we know the Acc but still will reject the measurement if noise is to big
     #define MAX_ACC_DIFF 500
     if (((axMax - axMin) > MAX_ACC_DIFF) or ((ayMax - ayMin) > MAX_ACC_DIFF) or ((azMax - azMin) > MAX_ACC_DIFF)) {
-        printf ("Error in IMU calibration: to much variations in the acceleration values\n");
-        return;
-    }
-    #define MAX_GYRO_DIFF 200
-    if (((gxMax - gxMin) > MAX_GYRO_DIFF) or ((gyMax - gyMin) > MAX_GYRO_DIFF) or ((gzMax - gzMin) > MAX_GYRO_DIFF)) {
-        printf ("Error in IMU calibration: to much variations in the gyro rates values\n");
+        printf ("Error in IMU calibration: to much variations in the acceleration values: x=%i y=%i z=%i\n", axMax - axMin, ayMax - ayMin , azMax - azMin);
         return;
     }
     axAccum /= (ACCEL_NUM_AVG_SAMPLES);
     ayAccum /= (ACCEL_NUM_AVG_SAMPLES);
     azAccum /= (ACCEL_NUM_AVG_SAMPLES);
-    gxAccum /= (ACCEL_NUM_AVG_SAMPLES);
-	gyAccum /= (ACCEL_NUM_AVG_SAMPLES);
-	gzAccum /= (ACCEL_NUM_AVG_SAMPLES);
-    uint8_t idx = 6; 
-    findGravity( axAccum , ayAccum , azAccum , idx);
-	switch (idx) {
-        case 0 :
-            axAccum -= (int32_t) accScale1G;
-            break;
-        case 1 :
-            axAccum += (int32_t) accScale1G;
-            break;
-        case 2 :
-            ayAccum -= (int32_t) accScale1G;
-            break;
-        case 3 :
-            ayAccum += (int32_t) accScale1G;
-            break;
-        case 4 :
-            azAccum -= (int32_t) accScale1G;
-            break;
-        case 5 :
-            azAccum += (int32_t) accScale1G;
-            break; 
-        case 6 :
-            printf("Error during calibration : gravity direction not found based on Accelerometer\n");
-            return;
-            break; 
-    }
-    printf("Upper face is "); printf(mpuOrientationNames[idx]);
-    config.accOffsetX = (int16_t)(axAccum);
-	config.accOffsetY = (int16_t)(ayAccum);
-	config.accOffsetZ = (int16_t)(azAccum);
-    config.gyroOffsetX = (int16_t)(gxAccum);
-	config.gyroOffsetY = (int16_t)(gyAccum);
-	config.gyroOffsetZ = (int16_t)(gzAccum);
-    config.mpuOrientationH =  idx ; // save the orientationH
-    printf("Acc & gyro after new calibration\n");
-    printConfigOffsets() ;
-    printf("Horizontal calibration done: use SAVE command to save the config!!\n");
-    setupOrientation();  // refresh the parameters linked to the orientation        
-    //sent2Core0(0XFF, 0XFFFFFFFF); // use a dummy type to give a command; here a cmd to save the config
-    
-    // restore dlpf
-    //uint8_t buffer2[2] = {MPU6050_RA_CONFIG , MPU6050_DLPF_BW_188};
-    //if( i2c_write_timeout_us(i2c1, MPU6050_DEFAULT_ADDRESS, &buffer2[0], 2, false,30000)<0){ // true to keep master control of bus
-    //    printf("Write error for MPU6050 calibration DLPF\n");
-    //    return false;
-    //}   
-    //sleep_ms(10);
+    // we store the value in an array
+    calibAccResults[calibAccCount] [0]= (int16_t) axAccum; 
+    calibAccResults[calibAccCount] [1]= (int16_t) ayAccum; 
+    calibAccResults[calibAccCount] [2]= (int16_t) azAccum; 
+    calibAccCount++;
+    float g = sqrtf((float) axAccum * (float) axAccum + (float) ayAccum * (float) ayAccum + (float) azAccum * (float) azAccum) / (float) accScale1G;
+    printf("x=%i y=%i z=%i g=%f\n", axAccum , ayAccum , azAccum , g);
 }
-
-void MPU::calibrationVerticalExecute() {
-    // read the Acc and detect which face is on the upper side
-    int16_t ax,ay,az ;
-    int16_t gx,gy,gz ;
-	    // Start reading acceleration registers from register 0x3B for 14 bytes (acc, temp, gyro)
-        uint8_t val = 0x3B;
-        uint8_t buffer[14]; 
-        if (i2c_write_timeout_us(i2c1, MPU6050_DEFAULT_ADDRESS, &val, 1, true,1000)<0) { // true to keep master control of bus
-            printf("Write error for MPU6050 calibration at 0X3B\n");
-            return;
-        }
-        if ( i2c_read_timeout_us(i2c1, MPU6050_DEFAULT_ADDRESS, buffer, 14, false, 3500) <0){
-            printf("Read error for MPU6050 calibration\n");
-            return;
-        }     
-        ax= (buffer[0] << 8 | buffer[1]);
-        ay= (buffer[2] << 8 | buffer[3]);
-        az= (buffer[4] << 8 | buffer[5]);
-    uint8_t idx = 6; 
-    findGravity( ax , ay , az , idx);
-	if (idx > 5){
-         printf("Error during vertical calibration: direction of gravity has not been found\n");
-         return;
-    }
-    printf("Upper face with nose is "); printf(mpuOrientationNames[idx]);
-    config.mpuOrientationV =  idx ; // save the orientationH
-    printf("Vertical calibration done: use SAVE command to save it\n");
-    setupOrientation();  // refresh the parameters linked to the orientation        
-}
-
-
 
 
 //--------------------------------------------------------------------------------------------------
@@ -361,18 +427,43 @@ void MPU::calibrationVerticalExecute() {
 //--------------------------------------------------------------------------------------------------
 // IMU algorithm update
 
+#define KP1_LOW_LIMIT 0.975
+#define KP1_HIGH_LIMIT 1.025
+#define KP1 2.0
+#define KI1 0.0
+
+#define KP2_LOW_LIMIT 0.950
+#define KP2_HIGH_LIMIT 1.050
+#define KP2 1.0
+#define KI2 0.0
+
 void Mahony_update(float ax, float ay, float az, float gx, float gy, float gz, float deltat) {
+    // currently ax, ay, az are in raw values (+- 32768) and gx,gy,gz are in rad/sec. 
     float recipNorm;
     float vx, vy, vz;
     float ex, ey, ez;  //error terms
     float qa, qb, qc;
     static float ix = 0.0, iy = 0.0, iz = 0.0;  //integral feedback terms
     float tmp;
+    float kp;
+    float ki;
+    float totalAccRaw = sqrt(ax * ax + ay * ay + az * az);
+    float totalAccG = totalAccRaw / accScale1G ; // convert in 1g to perform the comparison and to select best kp and ki
+    if (( totalAccG > KP1_LOW_LIMIT ) and ( totalAccG < KP1_HIGH_LIMIT )) { //When total acceleration is within some limits (close 1g)
+        kp = KP1;
+        ki = KI1;
+    } else if (( totalAccG > KP2_LOW_LIMIT ) and ( totalAccG < KP2_HIGH_LIMIT )) { //When total acceleration is within some limits (close 1g)
+        kp = KP2;
+        ki = KI2;
+    } else {
+        kp = 0;
+        ki = 0;
+    }
+    // 
     // Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
-    tmp = ax * ax + ay * ay + az * az;
     if (tmp > 0.0) {
         // Normalise accelerometer (assumed to measure the direction of gravity in body frame)
-        recipNorm = 1.0 / sqrt(tmp);
+        recipNorm = 1.0 / totalAccRaw;
         ax *= recipNorm;
         ay *= recipNorm;
         az *= recipNorm;
@@ -386,18 +477,24 @@ void Mahony_update(float ax, float ay, float az, float gx, float gy, float gz, f
         ey = (az * vx - ax * vz);
         ez = (ax * vy - ay * vx);
         // Compute and apply to gyro term the integral feedback, if enabled
-        if (Ki > 0.0f) {
-        ix += Ki * ex * deltat;  // integral error scaled by Ki
-        iy += Ki * ey * deltat;
-        iz += Ki * ez * deltat;
-        gx += ix;  // apply integral feedback
-        gy += iy;
-        gz += iz;
+        if (ki > 0.0f) {
+            ix += ki * ex * deltat;  // integral error scaled by Ki
+            iy += ki * ey * deltat;
+            iz += ki * ez * deltat;
+            gx += ix;  // apply integral feedback
+            gy += iy;
+            gz += iz;
         }
-        // Apply proportional feedback to gyro term
-        gx += Kp * ex;
-        gy += Kp * ey;
-        gz += Kp * ez;
+        if (kp > 0.0 ) {
+            // Apply proportional feedback to gyro term
+            gx += kp * ex;
+            gy += kp * ey;
+            gz += kp * ez;
+        } else { // total gravity is out of limits, discard accelerations and reset I terms
+            ix=0;
+            iy=0;
+            iz=0;
+        } 
     }
     // Integrate rate of change of quaternion, q cross gyro term
     deltat = 0.5 * deltat;
@@ -556,9 +653,28 @@ bool MPU::getAccZWorld(){ // return true when a value is available ; read the IM
         return false; // do not process when orientation is wrong
     }
     // we still have to apply offset and afterward the orientation parameters
-    aRaw[0] -= config.accOffsetX ; aRaw[1] -= config.accOffsetY ; aRaw[2] -= config.accOffsetZ;
-    gRaw[0] -= config.gyroOffsetX; gRaw[1] -= config.gyroOffsetY; gRaw[2] -= config.gyroOffsetZ;
+    //aRaw[0] -= config.accOffsetX ; aRaw[1] -= config.accOffsetY ; aRaw[2] -= config.accOffsetZ;
+    //float accOffX = 93.633688 ; 
+    //float accOffY = 142.927034 ;
+    //float accOffZ = -1067.694384 ;
+    //float accScaleXX = 0.993415;
+    //float accScaleYY = 1.000666;
+    //float accScaleZZ = 0.998804;
+    //float accScaleXY = 0.000002;
+    //float accScaleXZ = -0.003749;
+    //float accScaleYZ = 0.001992;
+    float accWithOffX = (float) aRaw[0] - config.accOffX;
+    float accWithOffY = (float) aRaw[1] - config.accOffY;
+    float accWithOffZ= (float) aRaw[2] - config.accOffZ;
+    aRaw[0] = accWithOffX * config.accScaleXX + accWithOffY * config.accScaleXY + accWithOffZ* config.accScaleXZ ;  // = X
+    aRaw[1] = accWithOffX * config.accScaleXY + accWithOffY * config.accScaleYY + accWithOffZ* config.accScaleYZ ;  // Y
+    aRaw[2] = accWithOffX * config.accScaleXZ + accWithOffY * config.accScaleYZ + accWithOffZ* config.accScaleZZ ;  // Z
 
+    gRaw[0] -= config.gyroOffsetX;
+    gRaw[1] -= config.gyroOffsetY;
+    gRaw[2] -= config.gyroOffsetZ;
+    
+    // take care of the orientation of the sensor in the model
     oax = aRaw[orientationX] * signX;
     oay = aRaw[orientationY] * signY;
     oaz = aRaw[orientationZ] * signZ;
@@ -570,7 +686,7 @@ bool MPU::getAccZWorld(){ // return true when a value is available ; read the IM
     sumAy += oay;
     sumAz += oaz;
     countSumAcc++;
-
+    //if (msgEverySec(0)) printf("ax=%i  ay=%i  az=%i\n", oax , oay , oaz);
     if ((config.gyroChanControl > 0) and (config.gyroChanControl <= 16) ) { // when gyro is used, send data to core0 to be used by gyro code
         sent2Core0( GYRO_X_ID , (int32_t) ogx >> (3-gyroScaleCode)) ;    // gyroScaleCode = 3 when 2000°/sec, 2=1000°/s , 1=500°/s, 0 when 250°/sec
         sent2Core0( GYRO_Y_ID , (int32_t) ogy >> (3-gyroScaleCode)) ;    // division is to get the same kind of unit (32768 = 2000°/sec) 
@@ -586,6 +702,7 @@ bool MPU::getAccZWorld(){ // return true when a value is available ; read the IM
     // and gives the same result as previous formula
     float accVert = 2.0*(qh[1]*qh[3] - qh[0]*qh[2])*( (float) oax) + 2.0f*(qh[0]*qh[1] + qh[2]*qh[3])*((float)oay)
      + (qh[0]*qh[0] - qh[1]*qh[1] - qh[2]*qh[2] + qh[3]*qh[3])*((float)oaz) - accScale1G; // scale =16384 for 1g when max is 2g (to be substracted)
+    
     sumAccZ += accVert;
     countAccZ++;
     roll  = RAD_TO_DEGREE * atan2((qh[0] * qh[1] + qh[2] * qh[3]), 0.5 - (qh[1] * qh[1] + qh[2] * qh[2]));
@@ -625,8 +742,10 @@ bool MPU::getAccZWorld(){ // return true when a value is available ; read the IM
     //ardupilot(ax, ay , az,  gx ,  gy , gz);
     //mylogic(ax, ay , az,  gx ,  gy , gz);
     //Madgwick6DOF(-ax, ay , az,  gx ,  -gy , -gz) ; // sign are from https://github.com/nickrehm/dRehmFlight/blob/master/Versions/dRehmFlight_Teensy_BETA_1.3/dRehmFlight_Teensy_BETA_1.3.ino
-
-    
+    //#define DEBUG_CAMERA_ROLL
+    #ifdef DEBUG_CAMERA_ROLL
+        if (msgEverySec(0)) printf("camera roll= %i\n", (int) roll);
+    #endif
     sent2Core0( CAMERA_PITCH_ID , (int32_t) (pitch * 10.0)) ;
     sent2Core0( CAMERA_ROLL_ID , (int32_t) (roll * 10.0)) ;
     if (vario1.newClimbRateAvailableForMpu){   // here once per about 20 msec
@@ -636,6 +755,9 @@ bool MPU::getAccZWorld(){ // return true when a value is available ; read the IM
         kalmanFilter4d_predict( ((float) (kfUs-lastKfUs )) /1000000.0f);
         lastKfUs = kfUs;  
         kalmanFilter4d_update( (float) vario1.rawRelAltitudeCm , (float) azWorldAverage /accScale1G * 981.0 , (float*) &zTrack , (float*)&vTrack);
+        if (debugAccZ == 'Y') {
+            if (msgEverySec(0)) printf("az=%i\n", (int) azWorldAverage );
+        }
         //printf("Vv4 Vk4  %d %d 50 -50\n", (int32_t) vario1.climbRateFloat ,  (int32_t) (float) vTrack);
         //printf("Va4 Va4  %d %d 50 -50\n", (int32_t) vario1.relativeAlt ,  (int32_t) (float) zTrack);
         sumAccZ= 0;

@@ -110,12 +110,12 @@ void setupSbus2Tlm(){
 
 /// \tag::uart_reset[]
 static inline void uart_reset_ms(uart_inst_t *uart) {
-    invalid_params_if(UART, uart != uart0 && uart != uart1);
+    //invalid_params_if(UART, uart != uart0 && uart != uart1);
     reset_block(uart_get_index(uart) ? RESETS_RESET_UART1_BITS : RESETS_RESET_UART0_BITS);
 }
 
 static inline void uart_unreset_ms(uart_inst_t *uart) {
-    invalid_params_if(UART, uart != uart0 && uart != uart1);
+    //invalid_params_if(UART, uart != uart0 && uart != uart1);
     unreset_block_wait(uart_get_index(uart) ? RESETS_RESET_UART1_BITS : RESETS_RESET_UART0_BITS);
 }
 /// \end::uart_reset[]
@@ -346,8 +346,8 @@ void fillBattery(uint8_t slot8){   // emulate SBS/01C ; Current from mA to 0.1A;
 }
 
 
-void fillRpm(uint8_t slot8){ // emulate SBS01RO ; in from Hz to 0.1 RPM 
-    uint32_t value =  fields[RPM].value * 10;
+void fillRpm(uint8_t slot8){ // emulate SBS01RO ; in from Rpm to 10 RPM 
+    uint32_t value =  fields[RPM].value / 10;
     if(value > 0xffff){
     value = 0xffff;
     }

@@ -33,8 +33,8 @@ struct STREAM_DATA {
   float pitch = 2;
   float yaw = 3;
   uint8_t gps_sats = 5;
-  float gps_lon = -0.6;//aérodrome
-  float gps_lat = 44.73333;//aérodrome
+  int32_t gps_lon = -6000000L;//aérodrome, degrés x 10000000
+  int32_t gps_lat = 447333300L;//aérodrome, degrés x 10000000
   float home_lon = -0.5672574;//Villenave d'Ornon
   float home_lat = 44.7799813;//Villenave d'Ornon
   float gps_speed = 100;

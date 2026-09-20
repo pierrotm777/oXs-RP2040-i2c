@@ -124,12 +124,16 @@ extern bool sbusPriMissingFlag ;
 extern bool sbusSecMissingFlag ;
 extern bool sbusPriFailsafeFlag ;
 extern bool sbusSecFailsafeFlag ;
+extern bool sbusOutMissingFlag ;
+extern bool sbusOutFailsafeFlag ;
+
+
 extern uint32_t lastRcChannels ;
 extern uint32_t lastPriChannelsMillis ;
 extern uint32_t lastSecChannelsMillis; 
 extern sbusFrame_s sbusFrame; // full frame including header and End bytes; To generate PWM , we use only the RcChannels part.
-extern sbusFrame_s sbus2Frame; // full frame including header and End bytes; To generate PWM , we use only the RcChannels part.
-extern bool newRcChannelsReceivedForPWM ;  // used to update the PWM data
+//extern sbusFrame_s sbus2Frame; // full frame including header and End bytes; To generate PWM , we use only the RcChannels part.
+extern bool newRcChannelsFrameReceived ;  // used to update the PWM data
 
 
 void setupFbus() {
@@ -329,12 +333,12 @@ void fbusDecodeRcChannels(){             // this code is similar to Sbus in
         ( sbusSecFailsafeFlag)  ||                                            //   or previous SEC is failsafe
         ( ( millisRp() - lastSecChannelsMillis )  > 50 )) {                     //   or SEC do not exist                   
         memcpy(  (uint8_t *) &sbusFrame.rcChannelsData, &fbusRxBuffer[2], 22); // copy the 22 bytes of RC channels
+        sbusOutMissingFlag = sbusPriMissingFlag ;    // used to gebnerate the Sbus failsafe/Missing flag for sbus out.
+        sbusOutFailsafeFlag = sbusPriFailsafeFlag ;
     }
     lastRcChannels = millisRp();
     lastPriChannelsMillis =  lastRcChannels;
-    newRcChannelsReceivedForPWM = true;  // used to update the PWM data
-
-    
+    newRcChannelsFrameReceived = true;  // used to update the PWM data    
 }
 
 

@@ -8,7 +8,7 @@
 #include "BMP280.h"
 #include "ads1115.h"
 #include "ms4525.h"
-#include "xgzp6897D.h"
+#include "XGZP6897D.h"
 #include "sdp3x.h"
 #include <string.h>
 #include <ctype.h>
@@ -32,6 +32,9 @@
 #include "gyro.h"
 #include "crsf_in.h"
 #include "sbus_in.h"
+#include "kx134.h"
+#include "sx126x_driver.h"
+#include "rfm95.h"
 
 // commands could be in following form:
 // C1 = 0/15  ... C16 = 0/15
@@ -46,7 +49,7 @@
 // SCL = 3, 7, 11, 15, 19, 23, 27  (I2C1)
 // RPM = 0/29 
 // LED = 16
-// PROTOCOL = C, S, J , M , I , F, 2, L, E
+// PROTOCOL = C, S, J , M , I , F, 2, L, E , B
 // for RP2040_zero, pin 16 = LED
 // When no config is found in memory, a default config is loaded (defined in config.h)
 // When a pin is not used, value = 0xFF
@@ -56,10 +59,6 @@
 // Spi SCK = 10, 14, 26 (for spi1)
 // Spi Mosi= 11, 15, 27 (for spi1)
 // spi Miso = 8, 12, 24, 28 (for spi1)
-
-#include "rlink.h" //Add PM
-#include "xbus.h" //Add PM
-#include "hitec.h" //Add PM		  
 
 #define CMD_BUFFER_LENTGH 3000
 uint8_t cmdBuffer[CMD_BUFFER_LENTGH];
@@ -73,8 +72,11 @@ extern uint32_t lastRcChannels;
 CONFIG config;
 uint8_t debugTlm = 'N';
 uint8_t debugSbusOut = 'N';
+uint8_t debugAccZ = 'N';
 
 uint8_t pinCount[30] = {0};
+
+uint32_t debugFlags = 0; // each bit says if a type of debug msg must be printed; list of bits is defined in an enum in param.h 
 
 // for sequencer
 int tempIntTable[10]; // temporary table to store n integers converted from the serial buffer (starting from pvalue)
@@ -105,6 +107,8 @@ extern ADS1115 adc1 ;
 extern ADS1115 adc2 ;    
 
 extern MPU mpu;
+extern KX134 kx134;
+extern float accScale1G ; // use here when printing the result of acc calibration.
 extern queue_t qSendCmdToCore1;
 
 extern uint8_t forcedFields;
@@ -122,6 +126,16 @@ extern const char* mpuOrientationNames[8];
 extern bool orientationIsWrong; 
 
 extern bool locatorInstalled;
+extern uint8_t loraState;
+
+//list of names when we print debugmsg list
+const char* debugMsg[DEBUG_MAX_NUMBER] = {\
+    "LOCATOR", "ESC"};
+
+//enum DEBUG_LIST : uint8_t {
+//    DEBUG_LORA,
+//    DEBUG_ESC,
+//    };
 
 
 void handleUSBCmd(void){
@@ -151,126 +165,206 @@ char * pkey = NULL;
 char * pvalue = NULL;
     
 
+void printHelp(){    
+    printf("\nCommands can be entered to change the config parameters (format is XXXX  or  XXXX=YYYY e.g. PRI=5)\n");
+    printf("    To enter several commands in one row, use "";"" between each command\n");
+    printf("GPIO's being used (to disable, set the value to 255)\n");
+    printf("  Function                  Command   Valid GPIO's\n");   
+	if ((config.protocol == 'R') || (config.protocol == 'X') || (config.protocol == 'T'))
+	{
+		printf("  Primary channels input    PRI     = 1, 5, 9, 13 (for SCL0)\n");
+	}
+	else
+	{
+	  printf("  Primary channels input    PRI     = 5, 9, 21, 25\n");  
+	}
+
+	printf("  Secondary channels input  SEC     = 1, 13, 17, 29\n");
+
+	if ((config.protocol == 'R') || (config.protocol == 'X') || (config.protocol == 'T'))
+	{
+		printf("  Telemetry                 TLM     = 0, 4, 8, 12 (for SDA0)\n");
+	}
+	else
+	{
+		printf("  Telemetry                 TLM     = 0, 1, 2, ..., 29\n");
+	}
+    printf("  GPS Rx                    GPS_RX  = 0, 1, 2, ..., 29\n");
+    printf("  GPS Tx                    GPS_TX  = 0, 1, 2, ..., 29\n");
+    printf("  Sbus OUT                  SBUS_OUT= 0, 1, 2, ..., 29\n");
+    printf("  RPM (only for Sport)      RPM     = 0, 1, 2, ..., 29\n");
+    printf("  SDA (baro sensor)         SDA     = 2, 6, 10, 14, 18, 22, 26\n");
+    printf("  SCL (baro sensor)         SCL     = 3, 7, 11, 15, 19, 23, 27\n");
+    printf("  PWM Channels 1, ..., 16   C1 / C16= 0, 1, 2, ..., 15\n");
+    printf("  Voltage 1, ..., 4         V1 / V4 = 26, 27, 28, 29\n");
+    printf("  RGB led                   RGB     = 0, 1, 2, ..., 29\n");
+    printf("  Logger                    LOG     = 0, 1, 2, ..., 29\n");
+    printf("  ESC                       ESC_PIN = 0, 1, 2, ..., 29\n");
+    printf("  Lora  CS                  SPI_CS  = 0, 1, 2, ..., 29\n");
+    printf("        SCK                 SPI_SCK = 10, 14, 26\n");
+    printf("        MOSI                SPI_MOSI = 11, 15, 27\n");
+    printf("        MISO                SPI_MISO = 8, 12, 24, 28\n");
+    printf("        BUSY                SPI_BUSY = 0, 1, 2, ..., 29\n");
+    printf("  Output level High (3.3V)  HIGH     = 0, 1, 2, ..., 29\n");
+    printf("               LOW  (0 V)   LOW      = 0, 1, 2, ..., 29\n");
+
+    printf("Rf protocol                 PROTOCOL= Y        Y is S(Sport Frsky), F(Fbus Frsky), B(HUB Frsky), C(CRSF/ELRS), H(Hott), M(Mpx)\n");
+    printf("                                               2(Sbus2 Futaba), J(Jeti), E(jeti Exbus), L (spektrum SRXL2) ,or I(IBus/Flysky)\n");
+    printf("                                               R(Rlink), T(Hitec), X(Xbus)\n");
+    printf("    CRSF baudrate:          CRSFBAUD = 420000\n");
+            
+    printf("Type of ESC :               ESC_TYPE = YYY      YYY is HW4(Hobbywing V4), HW5(Hobbywing V5), ZTW1(ZTW mantis),KON (Kontronik) or BLH(BlHeli) or JETI(Jeti)\n");
+    printf("Logger baudrate :           LOGBAUD = 115200\n");
+    printf("Refresh rate of servos      PWMHZ = 50          Value in range 50...333 (apply for PWM and sequencer)\n");
+    printf("Voltage scale x(1,2,3,4)    SCALEx = nnn.ddd    e.g. SCALE1=2.3 or SCALE3=0.123\n")  ;
+    printf("                            SCALEx = 0          Avoid sending voltage x to the Transmitter (for Frsky or Jeti)\n")  ;
+    printf("Voltage offset x(1,2,3,4)   OFFSETx = nnn.ddd   e.g. OFFSET1=0.6789\n")  ;
+    printf("Temperature (on V3, V4)     TEMP = Y            Y=1 if one TMP36 on V3, Y=2 if a second one is on V4\n");
+    
+    printf("GPS type                    GPS = Y             U=Ublox configured by oXs, E=Ublox configured Externally, C = CADIS\n");
+    printf("RPM multiplicator           RPM_MULT = Y.Y      e.g. 0.5 to divide RPM by 2\n");
+    printf("Led inversion               LED = N             N=normal , I=inverted\n");
+    printf("Failsafe mode               FAILSAFE = H        Set failsafe to Hold mode\n")  ;
+    printf("         values             SETFAILSAFE         Values are set on the current positions\n")  ;
+
+    printf("MPU6050 calibration         MPUCAL = Y          Y = A (Accelerometer), G(Gyro)\n");
+    printf("   Set Acc parameters       MPUACC = x.xx y.yy...  x.xx y.yy are 12 values (with decimal) space separated\n");
+    printf("MPU6050 orientation         MPUORI = Y          Y = H (Horizontal and still) or V (Vertical=nose up)\n");
+
+    printf("Rc channels  (1...16 or 255 for not in use)    can be used to manage airspeed/gyro/sequencers\n");
+    printf("    Airspeed                ACC = YY            To select Vspeed and compensation ratio\n");   
+    printf("    Gyro Mode/Gain          GMG = YY            To select mode/gain\n");
+    printf("    Gyro Stick Aileron      GSA = YY            Gyro only : Original aileron stick (without mix/limits/trim)\n");
+    printf("    Gyro Stick Elevator     GSE = YY               ""                 elevator \n");
+    printf("    Gyro Stick Rudder       GSR = YY               ""                 rudder   \n");
+    
+    printf("Gyro Gain on Roll           GGR = YYYY          Gain on roll axis (-127/127)\n");
+    printf("             Pitch          GGP = YYYY             ""    pitch\n");
+    printf("             Yaw            GGY = YYYY             ""    Yaw\n");
+    printf("     Gain on stick Throw    GGT = Y             1 (corr. on full throw) , 2 (on half) , 3 (on quater)\n");
+    printf("     Max Rotate             GMR = Y             1 (Very low) , 2 (low) , 3 (medium) , 4 (high)\n");
+    printf("     stick Rotate Enable    GRE =Y              1 (disabled) , 2 (enabled)\n");
+    printf("     Stabilize mode         GST = YYY           YY = ON or OFF(=hold mode replace stabilize mode)\n");
+    //printf("     Orientation(Hoz./Vert.)GOH = X or GOV = X  0(front X+), 1(back X-), 2(left Y+), 3(right Y-), 4(up Z+), 5(down Z-)\n");
+    printf("     PID parameters         PIDx = kpA kiA kdA kpE kiE kdE kpR kiR kdR       x=N(normal), H(hold), S(stab)\n");
+    printf("                                                kp, ki, kd are the values of one PID; A,E,R means for Aileron, Elevator, Rudder\n");
+
+    printf("Sequencers                  SEQ = YYYY          See Readme section to see how to fill YYYY\n");
+    printf("                            SEQ = DEL           Erase all sequencer\n");
+
+    printf("   Display raw Acc Z        DEBUGACCZ = Y or N  display vertical acc (useful to check offsets)\n");
+    printf("Testing                     FV                  Field Values (display all telemetry internal values)\n")  ;
+    printf("                            FVP                 Field Values Positieve (force the tlm values to positieve dummy values\n")  ;
+    printf("                            FVN                      idem with negatieve values\n")  ;
+    printf("                            PWM                 Display the current PWM values (in micro sec)\n");
+    printf("                            DEBUG=HELP          display commands to get some debug messages (up to next reset)\n");
+    printf("\n");
+    printf("To get the current config, just press Enter; send DUMP in order to get it in a way that allows copy/edit/paste.\n");
+    printf("To save changes, send SAVE; to get list of all commands send ""?""\n");
+    
+    printf("   Note: most changes require a reset after SAVE to be really applied (e.g. to unlock I2C bus)\n");
+}        
+
 void processCmd(){
     printf("processing cmd\n");
     bool updateConfig = false;      // after some cheks, says if we can save the config
-    bool updateSequencers = false;    // after some checks, says if we ca save the sequencers   
-    char *ptr;
-    uint32_t ui;
-    uint32_t ui2;
-    int32_t integerValue;
-    double db;    
+    bool updateSequencers = false;    // after some checks, says if we can save the sequencers   
     pkey = NULL;
     pvalue = NULL;
     //printf("buffer0= %X\n", cmdBuffer[0]);
     if (cmdBuffer[0] == 0x0D){ // when no cmd is entered we print the current config
+        // still when we are running a mpu calibration of the Acc, we send a command to be executed on core 1.
+        if ( mpu.calibAccRunning ) {
+            uint8_t data =  REQUEST_NEXT_ACC_CALIB;
+            queue_try_add(&qSendCmdToCore1 , &data);
+            return; // retun here to avoid other messages
+        }
         printConfigAndSequencers();
         return; 
     }
     if (cmdBuffer[0] == '?'){ // when help is requested we print the instruction
         isPrinting = true; //use to discard incoming data from Sbus... while printing a long text (to avoid having the queue saturated)
-        printf("\nCommands can be entered to change the config parameters (format is XXXX  or  XXXX=YYYY e.g. PRI=5)\n");
-        
-        printf("GPIO's being used (to disable, set the value to 255)\n");
-        printf("  Function                  Command   Valid GPIO's\n");   
-
-        if ((config.protocol == 'R') || (config.protocol == 'X') || (config.protocol == 'T'))
-        {
-            printf("  Primary channels input    PRI     = 0, 4, 8, 12 (for SDA0)\n");
-        }
-        else
-        {
-          printf("  Primary channels input    PRI     = 5, 9, 21, 25\n");  
-        }
-
-        printf("  Secondary channels input  SEC     = 1, 13, 17, 29\n");
-
-        if ((config.protocol == 'R') || (config.protocol == 'X') || (config.protocol == 'T'))
-        {
-            printf("  Telemetry                 TLM     = 1, 5, 9, 13 (for SCL0)\n");
-        }
-        else
-        {
-            printf("  Telemetry                 TLM     = 0, 1, 2, ..., 29\n");
-        }
-        printf("  GPS Rx                    GPS_RX  = 0, 1, 2, ..., 29\n");
-        printf("  GPS Tx                    GPS_TX  = 0, 1, 2, ..., 29\n");
-        printf("  Sbus OUT                  SBUS_OUT= 0, 1, 2, ..., 29\n");
-        printf("  RPM (only for Sport)      RPM     = 0, 1, 2, ..., 29\n");
-        printf("  SDA (baro sensor)         SDA     = 2, 6, 10, 14, 18, 22, 26\n");
-        printf("  SCL (baro sensor)         SCL     = 3, 7, 11, 15, 19, 23, 27\n");
-        printf("  PWM Channels 1, ..., 16   C1 / C16= 0, 1, 2, ..., 15\n");
-        printf("  Voltage 1, ..., 4         V1 / V4 = 26, 27, 28, 29\n");
-        printf("  RGB led                   RGB     = 0, 1, 2, ..., 29\n");
-        printf("  Camera                    PITCH, ROLL, PRATIO, RRATIO  = 1 to 16\n");
-        printf("  Logger                    LOG     = 0, 1, 2, ..., 29\n");
-        printf("  ESC                       ESC_PIN = 0, 1, 2, ..., 29\n");
-        printf("  Lora  CS                  SPI_CS  = 0, 1, 2, ..., 29\n");
-        printf("        SCK                 SPI_SCK = 10, 14, 26\n");
-        printf("        MOSI                SPI_MOSI = 11, 15, 27\n");
-        printf("        MISO                SPI_MISO = 8, 12, 24, 28\n");
-
-        printf("Rf protocol                 PROTOCOL= Y        Y is S(Sport Frsky), F(Fbus Frsky), C(CRSF/ELRS), H(Hott), M(Mpx)\n");
-        printf("                                               2(Sbus2 Futaba), J(Jeti), E(jeti Exbus), L (spektrum SRXL2) ,I(IBus/Flysky)\n");
-        printf("                                               and I2C protocols are R(RadioLink), X(spektrum Xbus) or T(Hitec)\n");
-        printf("    CRSF baudrate:          CRSFBAUD = 420000\n");
-                
-        printf("Type of ESC :               ESC_TYPE = YYY      YYY is HW4(Hobbywing V4), ZTW1(ZTW mantis),KON (Kontronik) or BLH(BlHeli)\n");
-        printf("Logger baudrate :           LOGBAUD = 115200\n");
-        printf("Refresh rate of servos      PWMHZ = 50          Value in range 50...333 (apply for PWM and sequencer)\n");
-        printf("Voltage scale x(1,2,3,4)    SCALEx = nnn.ddd    e.g. SCALE1=2.3 or SCALE3=0.123\n")  ;
-        printf("                            SCALEx = 0          Avoid sending voltage x to the Transmitter (for Frsky or Jeti)\n")  ;
-        printf("Voltage offset x(1,2,3,4)   OFFSETx = nnn.ddd   e.g. OFFSET1=0.6789\n")  ;
-        printf("Temperature (from V3, V4)   TEMP = Y            Y=1 if one TMP36 on V3, Y=2 if a second one is on V4\n");
-        printf("GPS type                    GPS = Y             U=Ublox configured by oXs, E=Ublox configured Externally, C = CADIS\n");
-        printf("RPM multiplicator           RPM_MULT = Y.Y      e.g. 0.5 to divide RPM by 2\n");
-        printf("Led inversion               LED = N             N=normal , I=inverted\n");
-        printf("Failsafe mode               FAILSAFE = H        Set failsafe to Hold mode\n")  ;
-        printf("         values             SETFAILSAFE         Values are set on the current positions\n")  ;
-        
-        printf("Rc channels  (1...16 or 255 for not in use)    can be used to manage airspeed/gyro/sequencers\n");
-        printf("    Airspeed                ACC = YY            To select Vspeed and compensation ratio\n");   
-        printf("    Gyro Mode/Gain          GMG = YY            To select mode/gain\n");
-        printf("    Gyro Stick Aileron      GSA = YY            Gyro only : Original aileron stick (without mix/limits/trim)\n");
-        printf("    Gyro Stick Elevator     GSE = YY               ""                 elevator \n");
-        printf("    Gyro Stick Rudder       GSR = YY               ""                 rudder   \n");
-        
-        printf("Gyro Gain on Roll           GGR = YYYY          Gain on roll axis (-127/127)\n");
-        printf("             Pitch          GGP = YYYY             ""    pitch\n");
-        printf("             Yaw            GGY = YYYY             ""    Yaw\n");
-        printf("     Gain on stick Throw    GGT = Y             1 (corr. on full throw) , 2 (on half) , 3 (on quater)\n");
-        printf("     Max Rotate             GMR = Y             1 (Very low) , 2 (low) , 3 (medium) , 4 (high)\n");
-        printf("     stick Rotate Enable    GRE =Y              1 (disabled) , 2 (enabled)\n");
-        printf("     Stabilize mode         GST = YYY           YY = ON or OFF(=hold mode replace stabilize mode)\n");
-        printf("     Orientation(Hoz./Vert.)GOH = X or GOV = X  0(front X+), 1(back X-), 2(left Y+), 3(right Y-), 4(up Z+), 5(down Z-)\n");
-        printf("     PID parameters         PIDx = kpA kiA kdA kpE kiE kdE kpR kiR kdR       x=N(normal), H(hold), S(stab)\n");
-        printf("                                                kp, ki, kd are the values of one PID; A,E,R means for Aileron, Elevator, Rudder\n");
-
-        printf("Sequencers                  SEQ = YYYY          See Readme section to see how to fill YYYY\n");
-        printf("                            SEQ = DEL           Erase all sequencer\n");
-        printf("Force MPU6050 calibration   MPUCAL=Y            Y = H (Horizontal and still) or V (Vertical=nose up)\n");
-        printf("Testing                     FV                  Field Values (display all telemetry internal values)\n")  ;
-        printf("                            FVP                 Field Values Positieve (force the tlm values to positieve dummy values\n")  ;
-        printf("                            FVN                      idem with negatieve values\n")  ;
-        printf("                            PWM                 Display the current PWM values (in micro sec)\n");
-        printf("\n");
-        printf("To get the current config, just press Enter; to save it in flash, send SAVE; to get list of commands send ""?""\n");
-        printf("   Note: some changes require a reset to be applied (e.g. to unlock I2C bus)\n");
+        printHelp();
         isPrinting = false;
         return;  
     }
-    if (cmdBuffer[0] != 0x0){
-        char * equalPos = strchr( (char*)cmdBuffer, '=');  // search position of '='
+    char * semicolPos;
+    char * currentPos = (char*) cmdBuffer ; // point to the begin of the buffer
+    uint32_t errorNumber = 0;
+    uint32_t updateNumber = 0;
+    
+    //printf("start handling buffer at %i\n", (int) currentPos);
+    while (true) { 
+        //    char * printPos = currentPos;
+        //    printf("buffer= ");
+        //    while ( *printPos != 0X00){
+        //        printf(" %X ", *printPos);
+        //        printPos++;
+        //    }
+        //    printf("\n");
+        currentPos = skipWhiteSpace(currentPos);    
+        if (* currentPos == 0x0) break ; // quit when remaining buffer to manage is empty
+        semicolPos = strchr( currentPos, ';');  // search position of ';'
+        if (semicolPos != NULL){ // there is a ';' so handle buffer up to ;
+            //printf("semicol found at %i\n", (int) semicolPos);   
         
-        if (equalPos != NULL){ // there is a '=' so search for value
-            *equalPos = 0x0;      // replace '=' with End of string    
-            equalPos++;           // point to next position  
-            pvalue = skipWhiteSpace(equalPos);
-            removeTrailingWhiteSpace(pvalue);
+            *semicolPos = 0x0;      // replace ';' with End of string
+        }
+        //printf("in while handling buffer at %i\n", (int) currentPos);   
+        int8_t result = handleOneCmd(currentPos);  // handle one command with buffer starting at currentPos up to a 0X00
+        //printf("end of in while handling buffer at %i\n", (int) currentPos);   
+        
+        if (result == -1) { 
+            errorNumber++; // count the number of errors
+        } else if (result == 1) {
+            updateNumber++; // count the number of update in config
         }    
-        pkey =  skipWhiteSpace((char*)cmdBuffer);  
-        removeTrailingWhiteSpace(pkey);
-    }
+        
+        if (semicolPos != NULL){ // there is a ';' so handle buffer at least once more;
+            currentPos = semicolPos + 1;
+            //if ( (*currentPos) == 0X00){
+            //    break;
+            //}
+        } else {
+            break;  
+        }         
+    }  // end while
+    if (errorNumber > 0) { // when at least one error has been detected
+        printf("%i error(s) have been detected!!\n", errorNumber);   
+    }    
+    if (updateNumber > 0) { // when at least one config parameter has been updated
+        printf("%i param have been modified. Still config has not yet been saved; use SAVE command to save it!!\n", updateNumber);  
+        configIsSaved = false;    //set a flag to say that config must still be saved
+        // disable interrupt to avoid having error msg about queue being full because part of main loop is not executed
+        uart_set_irq_enables(CRSF_UART_ID, false, false);
+        uart_set_irq_enables(CRSF2_UART_ID, false, false);
+        uart_set_irq_enables(SBUS_UART_ID, false, false);
+        uart_set_irq_enables(SBUS2_UART_ID, false, false);
+        // there are 3 irq used from pio/sm: pio0+sm1, pio0+sm3 ,  pio1+sm0
+        pio_set_irq0_source_enabled(pio0 ,  pis_sm1_rx_fifo_not_empty , false ); // pio/sm for Exbus, Hott, ibus,Mpx,sport, srxl2
+        pio_set_irq1_source_enabled(pio0 ,  pis_sm3_rx_fifo_not_empty , false ); // pio/sm for ESC
+        pio_set_irq0_source_enabled(pio1 ,  pis_sm0_rx_fifo_not_empty , false ); // pio/sm for GPS
+    }   
+}    
+      
+int8_t handleOneCmd( char * bufferPos){ // handle one command with buffer starting at bufferPos up to a 0X00
+                                        // return 1 when config has been updated , 0 when not updated and no error, -1 when error    
+    char *ptr;
+    uint32_t ui;
+    uint32_t ui2;
+    int32_t integerValue;
+    double db;    
+    int8_t errorCmd = -1;
+    char * equalPos = strchr( bufferPos, '=');  // search position of '='
+    
+    if (equalPos != NULL){ // there is a '=' so search for value
+        *equalPos = 0x0;      // replace '=' with End of string    
+        equalPos++;           // point to next position  
+        pvalue = skipWhiteSpace(equalPos);
+        removeTrailingWhiteSpace(pvalue);
+    }    
+    pkey =  skipWhiteSpace(bufferPos);  
+    removeTrailingWhiteSpace(pkey);
     upperStr(pkey);
     upperStr(pvalue);
     // pkey point to the key (before '=')
@@ -281,7 +375,7 @@ void processCmd(){
     printf("\n");
     
     // change PRI pin
-    if (( strcmp("PRI", pkey) == 0 ) && ((config.protocol != 'R')||(config.protocol != 'X')||(config.protocol != 'T'))){ 
+    if (( strcmp("PRI", pkey) == 0 ) && ((config.protocol != 'R') && (config.protocol != 'X') && (config.protocol != 'T'))){  
         ui = strtoul(pvalue, &ptr, 10);
         if ( *ptr != 0x0){
             printf("Error : pin must be an unsigned integer\n");
@@ -294,10 +388,9 @@ void processCmd(){
         } else {    
             config.pinPrimIn = ui;
             printf("Pin for primary channels input = %u\n" , config.pinPrimIn);
-            updateConfig = true;
+            return 1 ;
         }
     }
-
     if (( strcmp("PRI", pkey) == 0 ) && ((config.protocol == 'R')||(config.protocol == 'X')||(config.protocol == 'T'))){ 
         ui = strtoul(pvalue, &ptr, 10);
         if ( *ptr != 0x0){
@@ -307,10 +400,9 @@ void processCmd(){
         } else {    
             config.pinPrimIn = ui;
             printf("Pin for primary channels input = %u\n" , config.pinPrimIn);
-            updateConfig = true;
+            return 1 ;
         }
     }
-
     // change SEC pin
     if ( strcmp("SEC", pkey) == 0 ) { 
         ui = strtoul(pvalue, &ptr, 10);
@@ -321,13 +413,11 @@ void processCmd(){
         } else {    
             config.pinSecIn = ui;
             printf("Pin for secondary channels input = %u\n" , config.pinSecIn);
-            updateConfig = true;
+            return 1;
         }
     }
-
-
     // change TLM pin
-    if (( strcmp("TLM", pkey) == 0 ) && ((config.protocol != 'R')||(config.protocol != 'X')||(config.protocol != 'T'))){ 
+    if (( strcmp("TLM", pkey) == 0 ) && ((config.protocol != 'R') && (config.protocol != 'X') && (config.protocol != 'T'))){ 
         ui = strtoul(pvalue, &ptr, 10);
         if ( *ptr != 0x0){
             printf("Error : pin must be an unsigned integer\n");
@@ -336,10 +426,9 @@ void processCmd(){
         } else {    
             config.pinTlm = ui;
             printf("Pin for telemetry = %u\n" , config.pinTlm );
-            updateConfig = true;
+            return 1;
         }
     }
-
     // change TLM pin
     if (( strcmp("TLM", pkey) == 0 ) && ((config.protocol == 'R')||(config.protocol == 'X')||(config.protocol == 'T'))){ 
         ui = strtoul(pvalue, &ptr, 10);
@@ -350,11 +439,10 @@ void processCmd(){
         } else {    
             config.pinTlm = ui;
             printf("Pin for telemetry = %u\n" , config.pinTlm );
-            updateConfig = true;
+            return 1;
         }
     }
-
-
+	
     // change GPS Rx pin
     if ( strcmp("GPS_RX", pkey) == 0 ) { 
         ui = strtoul(pvalue, &ptr, 10);
@@ -365,7 +453,7 @@ void processCmd(){
         } else {    
             config.pinGpsRx = ui;
             printf("Pin for GPS Rx = %u\n" , config.pinGpsRx );
-            updateConfig = true;
+            return 1;
         }
     }
     // change GPS Tx pin
@@ -378,7 +466,7 @@ void processCmd(){
         } else {    
             config.pinGpsTx = ui;
             printf("Pin for GPS Tx = %u\n" , config.pinGpsTx );
-            updateConfig = true;
+            return 1;
         }
     }
     // change Sbus out pin
@@ -391,7 +479,7 @@ void processCmd(){
         } else {    
             config.pinSbusOut = ui;
             printf("Pin for Sbus output = %u\n" , config.pinSbusOut );
-            updateConfig = true;
+            return 1;
         }
     }
     // change for RPM pin
@@ -404,7 +492,7 @@ void processCmd(){
         } else {    
             config.pinRpm = ui;
             printf("Pin for RPM = %u\n" , config.pinRpm );
-            updateConfig = true;
+            return 1;
         }
     }
     // change for SDA pin
@@ -417,7 +505,7 @@ void processCmd(){
         } else {    
             config.pinSda = ui;
             printf("Pin for SDA (baro) = %u\n" , config.pinSda );
-            updateConfig = true;
+            return 1;
         }
     }
     // change for SCL pin
@@ -430,21 +518,86 @@ void processCmd(){
         } else {    
             config.pinScl = ui;
             printf("Pin for Scl (baro) = %u\n" , config.pinScl );
-            updateConfig = true;
+            return 1;
         }
     }
+    // change for getting the acceleration parameters (12 float values)
+    if ( strcmp("MPUACC", pkey) == 0 ) { 
+        if ( getAccParam()) { // return true when parameters are valid
+            return 1;
+        }
+    } 
+    // MPU calibration
     if ( strcmp("MPUCAL", pkey) == 0 ) {  
         if (!mpu.mpuInstalled) {
         printf("Calibration not done: no MP6050 installed\n");
-        } else if (!((strcmp("H", pvalue) == 0) || (strcmp("V", pvalue) == 0) )){  // only possible to request an horizontal or a vertical calibration
-            printf("Calibration not done: type must be H (Horizontal and still) or V (Vertical = nose up)\n"); 
+        } else if (!((strcmp("A", pvalue) == 0) || (strcmp("G", pvalue) == 0) || (strcmp("E", pvalue) == 0) ) ){ 
+             // only possible to request an acc or gyro calibration
+            printf("Calibration not done: type must be A (accelerometers) or G (gyro)\n"); 
         } else {    
-            uint8_t data = REQUEST_VERTICAL_MPU_CALIB ;
+            uint8_t data ;
+            if (strcmp("A", pvalue) == 0){
+                if (mpu.calibAccRunning){
+                    printf("Acc calibration is already running; command discarded ; enter MPUCAL=E first to stop calibration\n");
+                    return -1;
+                }    
+                printf("\nAccelerometer calibration process will start\n");
+                printf("   Keep sensor still and Press Enter to perform one measurement\n");
+                printf("   Repeat in many orientations (min 20, max 200)\n");
+                printf("   Enter MPUCAL=E to stop the calibration process and get all measurements\n");
+                printf("   All measurements have to be copy/paste in a txt file and imported in MAGNETO 1.2 software\n");
+                printf("   see https://sites.google.com/view/sailboatinstruments1/a-download-magneto-v1-2?authuser=0\n");
+                mpu.calibAccCount=0;
+                mpu.calibAccRunning = true;
+                return 0;
+            }
+            if (strcmp("E", pvalue) == 0){
+                if (mpu.calibAccCount == 0){
+                    printf("No Acc measurements have been captured yet\n");
+                    if ( mpu.calibAccRunning) {
+                        printf("Calibration is running; press Enter to perform a measurement\n");
+                    } else {
+                        printf("Calibration is not running; press MPUCAL=A to start calibration\n");
+                    }
+                } else {
+                    printf("There are %i measurements to copy/paste in a txt file and to import in MAGNETO 1.2 software\n", mpu.calibAccCount);
+                    printf("The Norm to use in MAGNETO 1.2 is %i\n", (int) accScale1G);
+                    for (int i= 0 ; i < mpu.calibAccCount ; i++){
+                    printf("%i  %i  %i\n", mpu.calibAccResults[i][0] , mpu.calibAccResults[i][1] ,mpu.calibAccResults[i][2] );
+                    }
+                }    
+                mpu.calibAccRunning = false;
+                return 0;
+            }
+            if (strcmp("G", pvalue) == 0){
+                data = REQUEST_GYRO_CALIBRATION;
+                queue_try_add(&qSendCmdToCore1 , &data);
+                return 0; // retun here to avoid other messages//if (strcmp("H", pvalue) == 0){
+            }
+            //    data = REQUEST_HORIZONTAL_MPU_CALIB; //  = execute calibration by core 1
+            //} else {
+            //    data = REQUEST_VERTICAL_MPU_CALIB ;
+            //} 
+            //queue_try_add(&qSendCmdToCore1 , &data);
+            //return 0; // retun here to avoid other messages    
+        }
+    }
+    // MPU orientation
+    if ( strcmp("MPUORI", pkey) == 0 ) {  
+        if (!mpu.mpuInstalled) {
+        printf("Orientation not done: no MP6050 installed\n");
+        } else if (!((strcmp("H", pvalue) == 0) || (strcmp("V", pvalue) == 0) ) ){ 
+             // only possible to request an acc or gyro calibration
+            printf("Orientation not done: type must be H (horizontal) or V (vertical)\n"); 
+        } else {    
+            uint8_t data ;
             if (strcmp("H", pvalue) == 0){
-              data = REQUEST_HORIZONTAL_MPU_CALIB; //  = execute calibration
+                data = REQUEST_USB_HORIZONTAL_MPU_CALIB;
+            } else {
+                data = REQUEST_USB_VERTICAL_MPU_CALIB ;
             } 
             queue_try_add(&qSendCmdToCore1 , &data);
-            return; // retun here to avoid other messages
+            return 0; // retun here to avoid other messages    
         }
     }
     
@@ -464,7 +617,7 @@ void processCmd(){
             } else {    
                 config.pinChannels[ui2-1] = ui;
                 printf("Pin for channel %" PRIu32 " = %u\n" , ui2 , config.pinChannels[ui2-1] );
-                updateConfig = true;
+                return 1;
             }    
         }
     }
@@ -483,12 +636,10 @@ void processCmd(){
             } else {    
                 config.pinVolt[ui2-1] = ui;
                 printf("Pin for voltage %" PRIu32 " = %u\n" , ui2, config.pinVolt[ui2-1] );
-                updateConfig = true;
+                return 1;
             }    
         }
     }
-
-
     // change for Camera pin Pitch
     if ( strcmp("PITCH", pkey) == 0 ) { 
         ui = strtoul(pvalue, &ptr, 10);
@@ -499,7 +650,7 @@ void processCmd(){
         } else {    
             config.CamPitchChannel = ui;
             printf("Pin for Pitch = %u\n" , config.CamPitchChannel );
-            updateConfig = true;
+            return 1;
         }
     }
     // change for Camera pin Roll
@@ -512,7 +663,7 @@ void processCmd(){
         } else {    
             config.CamRollChannel = ui;
             printf("Pin for Roll = %u\n" , config.CamRollChannel );
-            updateConfig = true;
+            return 1;
         }
     }
     // change for Camera pin Pitch Ratio
@@ -525,7 +676,7 @@ void processCmd(){
         } else {    
             config.CamPitchRatio = ui;
             printf("Pin for Pitch Ratio = %u\n" , config.CamPitchRatio );
-            updateConfig = true;
+            return 1;
         }
     }
     // change for Camera pin Roll Ratio
@@ -538,11 +689,10 @@ void processCmd(){
         } else {    
             config.CamRollRatio = ui;
             printf("Pin for Roll Ratio = %u\n" , config.CamRollRatio );
-            updateConfig = true;
+            return 1;
         }
     }
-
-
+        
     // change crsf baudrate
     if ( strcmp("CRSFBAUD", pkey) == 0 ) { // if the key is CRSFBAUD
         ui = strtoul(pvalue, &ptr, 10);
@@ -551,7 +701,7 @@ void processCmd(){
         } else {
             config.crsfBaudrate = ui;
             printf("CRSF baudrate = %" PRIu32 "\n" , config.crsfBaudrate);
-            updateConfig = true;
+            return 1;
         }
     }
     
@@ -559,9 +709,10 @@ void processCmd(){
     if ( strcmp("DEBUGTLM", pkey) == 0 ) { // if the key is DEBUGTLM
         if (strcmp("Y", pvalue) == 0) {
             debugTlm = 'Y';
+            return 0;
         } else if (strcmp("N", pvalue) == 0) {
             debugTlm = 'N';
-            //updateConfig = true; // this is not saved
+            return 0; 
         } else  {
             printf("Error : DEBUGTLM must be Y or N\n");
         }
@@ -571,18 +722,32 @@ void processCmd(){
     if ( strcmp("DEBUGSBUSOUT", pkey) == 0 ) { // if the key is DEBUGSBUSOUT
         if (strcmp("Y", pvalue) == 0) {
             debugSbusOut = 'Y';
+            return 0;
         } else if (strcmp("N", pvalue) == 0) {
             debugSbusOut = 'N';
-            //updateConfig = true; // this is not saved
+            return 0; // this is not saved
         } else  {
             printf("Error : DEBUGSBUSOUT must be Y or N\n");
+        }
+    }
+    
+    // change debugAccZ
+    if ( strcmp("DEBUGACCZ", pkey) == 0 ) { // if the key is DEBUGACCZ
+        if (strcmp("Y", pvalue) == 0) {
+            debugAccZ = 'Y';
+            return 0;
+        } else if (strcmp("N", pvalue) == 0) {
+            debugAccZ = 'N';
+            return 0; // this is not saved
+        } else  {
+            printf("Error : DEBUGTLM must be Y or N\n");
         }
     }
     
     // print current values of all telemetry fields
     if ( strcmp("FV", pkey) == 0 ) { 
             printFieldValues();
-            return;
+            return 0;
     }
     // force dummy positive value
     if ( strcmp("FVP", pkey) == 0 ) { 
@@ -594,7 +759,7 @@ void processCmd(){
             printf("Internal telemetry fields are now filled with POSITIVE dummy values\n");
             printf("To get real values again, you have to power down\n");
             
-            return;
+            return 0;
     }
 // force dummy negative value
     if ( strcmp("FVN", pkey) == 0 ) { 
@@ -606,97 +771,94 @@ void processCmd(){
             printFieldValues();
             printf("Internal telemetry fields are now filled with NEGATIVE dummy values\n");
             printf("To get real values again, you have to power down\n");
-            return;
+            return 0;
     }
     // print current values of all PWM fields
     if ( strcmp("PWM", pkey) == 0 ) { 
             printPwmValues();
-            return;
+            return 0;
     }
     // change protocol
     if ( strcmp("PROTOCOL", pkey) == 0 ) { // 
         if (strcmp("S", pvalue) == 0) {
             config.protocol = 'S';
-            updateConfig = true;
+            return 1;
+        } else if (strcmp("B", pvalue) == 0) {
+            config.protocol = 'B';
+            return 1;
         } else if (strcmp("C", pvalue) == 0) {
             config.protocol = 'C';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("J", pvalue) == 0) {
             config.protocol = 'J';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("E", pvalue) == 0) {
             config.protocol = 'E';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("H", pvalue) == 0) {
             config.protocol = 'H';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("M", pvalue) == 0) {
             config.protocol = 'M';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("F", pvalue) == 0) {
             config.protocol = 'F';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("I", pvalue) == 0) {
             config.protocol = 'I';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("2", pvalue) == 0) {
             config.protocol = '2';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("L", pvalue) == 0) {
             config.protocol = 'L';
-            updateConfig = true;
-
+            return 1;
 /* Add I2C Protocols */
         } else if (strcmp("R", pvalue) == 0) {/*Ajout RadioLink*/
             config.protocol = 'R';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("X", pvalue) == 0) {/*Ajout Spektrum Xbus*/
             config.protocol = 'X';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("T", pvalue) == 0) {/*Ajout Hitec*/
             config.protocol = 'T';
-            updateConfig = true;
+            return 1;
 /* Add I2C Protocols */
-
         } else  {
-            printf("Error : protocol must be S(Sport Frsky), F(Fbus Frsky), C(CRSF=ELRS), J(Jeti), E(jeti Exbus), H(Hott), M(Mpx), 2(Sbus2 Futaba), L(SRXL2 Spektrum) or I(Ibus/Flysky)\n");
+            printf("Error : protocol must be S(Sport Frsky), F(Fbus Frsky), B(Hub Frsky), C(CRSF=ELRS), J(Jeti), E(jeti Exbus), H(Hott), M(Mpx), 2(Sbus2 Futaba), L(SRXL2 Spektrum) or I(Ibus/Flysky)\n");
         }
     }
     
     
-    // change scale
+    // change voltage scale
     if (( strcmp("SCALE1", pkey) == 0 ) || ( strcmp("SCALE2", pkey) == 0 )\
          || ( strcmp("SCALE3", pkey) == 0 )  || ( strcmp("SCALE4", pkey) == 0 ) ){ 
         db = strtod(pvalue,&ptr);
         if (*ptr != 0x0) {
             printf("Error : value is not a valid float\n");
         } else {
-            updateConfig = true;
-            if (*(pkey+5) == '1' ) {config.scaleVolt1 = db;}
-            else if (*(pkey+5) == '2' ) {config.scaleVolt2 = db;}
-            else if (*(pkey+5) == '3' ) {config.scaleVolt3 = db;}
-            else if (*(pkey+5) == '4' ) {config.scaleVolt4 = db;}
+            if (*(pkey+5) == '1' ) {config.scaleVolt1 = db; return 1;}
+            else if (*(pkey+5) == '2' ) {config.scaleVolt2 = db;return 1;}
+            else if (*(pkey+5) == '3' ) {config.scaleVolt3 = db;return 1;}
+            else if (*(pkey+5) == '4' ) {config.scaleVolt4 = db;return 1;}
             else {
                 printf("Error : x must be 1...4 in SCALEx\n");
-                updateConfig = false;
             }
         }
     }
-    // change offset
+    // change voltage offset
     if (( strcmp("OFFSET1", pkey) == 0 ) || ( strcmp("OFFSET2", pkey) == 0 )\
          || ( strcmp("OFFSET3", pkey) == 0 )  || ( strcmp("OFFSET4", pkey) == 0 ) ){ 
         db = strtod(pvalue,&ptr);
         if (*ptr != 0x0) {
             printf("Error : value is not a valid float\n");
         } else {
-            updateConfig = true;
-            if (*(pkey+6) == '1' ) {config.offset1 = db;}
-            else if (*(pkey+6) == '2' ) {config.offset2 = db;}
-            else if (*(pkey+6) == '3' ) {config.offset3 = db;}
-            else if (*(pkey+6) == '4' ) {config.offset4 = db;}
+            if (*(pkey+6) == '1' ) {config.offset1 = db;return 1;}
+            else if (*(pkey+6) == '2' ) {config.offset2 = db;return 1;}
+            else if (*(pkey+6) == '3' ) {config.offset3 = db;return 1;}
+            else if (*(pkey+6) == '4' ) {config.offset4 = db;return 1;}
             else {
                 printf("Error : x must be 1...4 in OFFSETx\n");
-                updateConfig = false;
             }
         }
     }
@@ -704,13 +866,13 @@ void processCmd(){
     if ( strcmp("GPS", pkey) == 0 ) {
         if (strcmp("U", pvalue) == 0) {
             config.gpsType = 'U';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("E", pvalue) == 0) {
             config.gpsType = 'E';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("C", pvalue) == 0) {
             config.gpsType = 'C';
-            updateConfig = true;
+            return 1;
         } else  {
             printf("Error : GPS type must be U, E or C\n");
         }
@@ -722,7 +884,7 @@ void processCmd(){
             printf("Error : value is not a valid float\n");
         } else {
             config.rpmMultiplicator = db;
-            updateConfig = true;
+            return 1;
         }
     }
     
@@ -734,7 +896,7 @@ void processCmd(){
         if (strcmp("SBUS", pvalue) == 0) {
             config.gpio0 = 0 ;
             printf("gpio0 = Sbus\n" );
-            updateConfig = true;
+            return 1;
         } else {
             ui = strtoul(pvalue, &ptr, 10);
             if ( *ptr != 0x0 || (ui == 0) || ui > 16){
@@ -742,7 +904,7 @@ void processCmd(){
             } else {
                 config.gpio0 = ui;
                 printf("GPIO0 = %u\n" , (unsigned int) config.gpio0);
-                updateConfig = true;
+                return 1;
             }
         }    
     }
@@ -755,7 +917,7 @@ void processCmd(){
             } else {
                 config.gpio1 = ui;
                 printf("GPIO1 = %u\n" , (unsigned int) config.gpio1);
-                updateConfig = true;
+                return 1;
             }
     }
     
@@ -768,7 +930,7 @@ void processCmd(){
             } else {
                 config.gpio5 = ui;
                 printf("GPIO5 = %u\n" , (unsigned int) config.gpio5);
-                updateConfig = true;
+                return 1;
             }
     }
 
@@ -781,7 +943,7 @@ void processCmd(){
             } else {
                 config.gpio11 = ui;
                 printf("GPIO11 = %u\n" , (unsigned int) config.gpio11);
-                updateConfig = true;
+                return 1;
             }
     }
     */
@@ -790,7 +952,7 @@ void processCmd(){
     if ( strcmp("FAILSAFE", pkey) == 0 ) {
         if (strcmp("H", pvalue) == 0) {
             config.failsafeType = 'H';
-            updateConfig = true;
+            return 1;
         } else  {
             printf("Error : FAILSAFE mode must be H\n");
         }
@@ -800,7 +962,7 @@ void processCmd(){
         if ( lastRcChannels ) {
             config.failsafeType = 'C'; // remove 'H' for HOLD
             memcpy( &config.failsafeChannels , &sbusFrame.rcChannelsData, sizeof(config.failsafeChannels));
-            updateConfig = true;
+            return 1;
         } else {
             printf("Error : No RC channels have been received yet. FAILSAFE values are unknown\n");
         }    
@@ -815,7 +977,7 @@ void processCmd(){
         } else {    
             config.temperature = ui;
             printf("Number of temperature sensors = %u\n" , config.temperature );
-            updateConfig = true;
+            return 1;
         }
     }
     // change Vspeed compensation channel 
@@ -828,7 +990,7 @@ void processCmd(){
         } else {    
             config.VspeedCompChannel = ui;
             printf("Vspeed compensation channel = %u\n" , config.VspeedCompChannel);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -842,7 +1004,7 @@ void processCmd(){
         } else {    
             config.pinLed = ui;
             printf("gpio for RGB led = %u\n" , config.pinLed );
-            updateConfig = true;
+            return 1;
         }
     }
     
@@ -850,10 +1012,10 @@ void processCmd(){
     if ( strcmp("LED", pkey) == 0 ) {
         if (strcmp("N", pvalue) == 0) {
             config.ledInverted = 'N';
-            updateConfig = true;
+            return 1;
         } else if (strcmp("I", pvalue) == 0) {
             config.ledInverted = 'I';
-            updateConfig = true;
+            return 1;
         } else  {
             printf("Error : LED color must be N (normal) or I(inverted)\n");
         }
@@ -869,7 +1031,7 @@ void processCmd(){
         } else {    
             config.pinLogger = ui;
             printf("Gpio for Logger = %u\n" , config.pinLogger );
-            updateConfig = true;
+            return 1;
         }
     }
     
@@ -881,7 +1043,7 @@ void processCmd(){
         } else {
             config.loggerBaudrate = ui;
             printf("Logger baudrate = %" PRIu32 "\n" , config.loggerBaudrate);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -895,7 +1057,7 @@ void processCmd(){
         } else {    
             config.pinEsc = ui;
             printf("Pin for ESC = %u\n" , config.pinEsc );
-            updateConfig = true;
+            return 1;
         }
     }
     
@@ -903,25 +1065,33 @@ void processCmd(){
     if ( strcmp("ESC_TYPE", pkey) == 0 ) { 
         if (strcmp("HW4", pvalue) == 0) {
             config.escType = HW4 ;
-            printf("escType is now HW4 (Hobbywing)\n");
-            updateConfig = true; 
+            printf("escType is now HW4 (Hobbywing v4)\n");
+            return 1; 
         //} else if  (strcmp("HW3", pvalue) == 0) {
         //    config.escType = HW3 ;
-        //    updateConfig = true;
+        //    return 1;
+        } else if  (strcmp("HW5", pvalue) == 0) {
+            config.escType = HW5 ;
+            printf("escType is now HW5 (Hobbywing V5)\n");
+            return 1;
         } else if (strcmp("KON", pvalue) == 0) {
             config.escType = KONTRONIK ;
             printf("escType is now KON (Kontronik)\n");
-            updateConfig = true;
+            return 1;
         } else if (strcmp("ZTW1", pvalue) == 0) {
             config.escType = ZTW1 ;
             printf("escType is now ZTW1\n");
-            updateConfig = true;
+            return 1;
         } else if (strcmp("BLH", pvalue) == 0) {
             config.escType = BLH ;
             printf("escType is now BLH (BlHeli)\n");
-            updateConfig = true;
+            return 1;
+        } else if (strcmp("JETI", pvalue) == 0) {
+            config.escType = JETI_ESC ;
+            printf("escType is now JETI (Jeti)\n");
+            return 1;
         } else {    
-            printf("Error : ESC_TYPE must be HW4, ZTW1, KON or BLH\n");
+            printf("Error : ESC_TYPE must be HW4, HW5, ZTW1, KON or BLH or JETI\n");
         }
     }
 
@@ -935,7 +1105,7 @@ void processCmd(){
         } else {
             config.pwmHz = ui;
             printf("PwmHz = %" PRIu32 "\n" , config.pwmHz);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -949,7 +1119,7 @@ void processCmd(){
         } else {    
             config.gyroChanControl = ui;
             printf("Gyro mode/gain channel = %u\n" , config.gyroChanControl);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -963,7 +1133,7 @@ void processCmd(){
         } else {    
             config.gyroChan[0] = ui;
             printf("Gyro stick aileron = %u\n" , config.gyroChan[0]);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -977,7 +1147,7 @@ void processCmd(){
         } else {    
             config.gyroChan[1] = ui;
             printf("Gyro stick elevator channel = %u\n" , config.gyroChan[1]);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -991,7 +1161,7 @@ void processCmd(){
         } else {    
             config.gyroChan[2] = ui;
             printf("Gyro stick rudder channel = %u\n" , config.gyroChan[2]);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -1005,7 +1175,7 @@ void processCmd(){
         } else {    
             config.vr_gain[0] = (int8_t) integerValue;
             printf("Gain on roll axis= %i\n" , config.vr_gain[0]);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -1019,7 +1189,7 @@ void processCmd(){
         } else {    
             config.vr_gain[1] = (int8_t) integerValue;
             printf("Gain on pitch axis= %i\n" , config.vr_gain[1]);
-            updateConfig = true;
+            return 1;
         }
     }
     
@@ -1033,7 +1203,7 @@ void processCmd(){
         } else {    
             config.vr_gain[2] = (int8_t) integerValue;
             printf("Gain on yaw axis= %i\n" , config.vr_gain[2]);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -1047,7 +1217,7 @@ void processCmd(){
         } else {    
             config.stick_gain_throw = (enum STICK_GAIN_THROW) ui;
             printf("Gyro gain stick throw = %u\n" , (uint32_t) config.stick_gain_throw);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -1061,7 +1231,7 @@ void processCmd(){
         } else {    
             config.max_rotate = (enum MAX_ROTATE) ui;
             printf("Gyro max rotate = %u\n" , (uint32_t) config.max_rotate);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -1075,7 +1245,7 @@ void processCmd(){
         } else {    
             config.rate_mode_stick_rotate = (enum RATE_MODE_STICK_ROTATE) ui;
             printf("Max rotate enable in rate mode = %u\n" , (uint32_t) config.stick_gain_throw);
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -1083,55 +1253,55 @@ void processCmd(){
     if ( strcmp("GST", pkey) == 0 ) { 
         if (strcmp("ON", pvalue) == 0) {
             config.gyroAutolevel=true;
-            updateConfig = true;
+            return 1;
         } else if (strcmp("OFF", pvalue) == 0) {
             config.gyroAutolevel=false;
-            updateConfig = true;
+            return 1;
         } else {
             printf("For GST command the value must be ON (Stabilize) or OFF (Hold)\n");
         }
     }
 
-    // Change gyro horizontal orientation
-    if ( strcmp("GOH", pkey) == 0 ) { 
-        ui = strtoul(pvalue, &ptr, 10);
-        if ( *ptr != 0x0){
-            printf("Error : gyro orientation must be an unsigned integer\n");
-        } else if ( !(ui <= 5)) {
-            printf("Error : gyro orientation must be <= 5\n");
-        } else {    
-            config.mpuOrientationH = ui;
-            printf("Gyro horizontal orientation is  ");
-            printf(mpuOrientationNames[config.mpuOrientationH]);
-            printf("\n");
-            setupOrientation(); // based on config.mpuOrientation fill orientationX,Y,Z and signX, Y, Z and orientationIsWrong
-            updateConfig = true;
-        }
-    }
+    // Change gyro horizontal orientation // not used anymore with the learning process
+    //if ( strcmp("GOH", pkey) == 0 ) { 
+    //    ui = strtoul(pvalue, &ptr, 10);
+    //    if ( *ptr != 0x0){
+    //        printf("Error : gyro orientation must be an unsigned integer\n");
+    //    } else if ( !(ui <= 5)) {
+    //        printf("Error : gyro orientation must be <= 5\n");
+    //    } else {    
+    //        config.mpuOrientationH = ui;
+    //        printf("Gyro horizontal orientation is  ");
+    //        printf(mpuOrientationNames[config.mpuOrientationH]);
+    //        printf("\n");
+    //        setupOrientation(); // based on config.mpuOrientation fill orientationX,Y,Z and signX, Y, Z and orientationIsWrong
+    //        return 1;
+    //    }
+    //}
 
     // Change gyro vertical orientation
-    if ( strcmp("GOV", pkey) == 0 ) { 
-        ui = strtoul(pvalue, &ptr, 10);
-        if ( *ptr != 0x0){
-            printf("Error : gyro orientation must be an unsigned integer\n");
-        } else if ( !(ui <= 5)) {
-            printf("Error : gyro orientation must be <= 5\n");
-        } else {    
-            config.mpuOrientationV = ui;
-            printf("Gyro vertical orientation is ");
-            printf(mpuOrientationNames[config.mpuOrientationV]);
-            printf("\n");
-            setupOrientation(); // based on config.mpuOrientation fill orientationX,Y,Z and signX, Y, Z and orientationIsWrong
-            updateConfig = true;
-        }
-    }
+    //if ( strcmp("GOV", pkey) == 0 ) { 
+    //    ui = strtoul(pvalue, &ptr, 10);
+    //    if ( *ptr != 0x0){
+    //        printf("Error : gyro orientation must be an unsigned integer\n");
+    //    } else if ( !(ui <= 5)) {
+    //        printf("Error : gyro orientation must be <= 5\n");
+    //    } else {    
+    //        config.mpuOrientationV = ui;
+    //        printf("Gyro vertical orientation is ");
+    //        printf(mpuOrientationNames[config.mpuOrientationV]);
+    //        printf("\n");
+    //        setupOrientation(); // based on config.mpuOrientation fill orientationX,Y,Z and signX, Y, Z and orientationIsWrong
+    //        return 1;
+    //    }
+    //}
 
 
     // get PID for rate mode
     if ( strcmp("PIDN", pkey) == 0 ) { 
         if (getPid(0)){ // true when valid syntax is decoded and pid structure has been updated ;
                                   // we will save the structure and reboot; during reboot we will check if config is valid
-            updateConfig = true;
+            return 1;
         } else {
             printf("\nError in syntax or in a parameter: command PIDN= is discarded\n");
         }  
@@ -1141,7 +1311,7 @@ void processCmd(){
     if ( strcmp("PIDH", pkey) == 0 ) { 
         if (getPid(1)){ // true when valid syntax is decoded and pid structure has been updated ;
                                   // we will save the structure and reboot; during reboot we will check if config is valid
-            updateConfig = true;
+            return 1;
         } else {
             printf("\nError in syntax or in a parameter: command PIDH= is discarded\n");
         }  
@@ -1151,7 +1321,7 @@ void processCmd(){
     if ( strcmp("PIDS", pkey) == 0 ) { 
         if (getPid(2)){ // true when valid syntax is decoded and pid structure has been updated ;
                                   // we will save the structure and reboot; during reboot we will check if config is valid
-            updateConfig = true;
+            return 1;
         } else {
             printf("\nError in syntax or in a parameter: command PIDS= is discarded\n");
         }  
@@ -1167,7 +1337,7 @@ void processCmd(){
         } else {    
             config.pinSpiCs = ui;
             printf("Pin for SPI CS = %u\n" , config.pinSpiCs );
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -1181,7 +1351,7 @@ void processCmd(){
         } else {    
             config.pinSpiSck = ui;
             printf("Pin for SPI SCK = %u\n" , config.pinSpiSck );
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -1195,7 +1365,7 @@ void processCmd(){
         } else {    
             config.pinSpiMosi = ui;
             printf("Pin for SPI MOSI = %u\n" , config.pinSpiMosi );
-            updateConfig = true;
+            return 1;
         }
     }
 
@@ -1210,11 +1380,61 @@ void processCmd(){
         } else {    
             config.pinSpiMiso = ui;
             printf("Pin for SPI MISO = %u\n" , config.pinSpiMiso );
-            updateConfig = true;
+            return 1;
         }
     }
 
+    // change for LORA Busy 
+       if ( strcmp("SPI_BUSY", pkey) == 0 ) { 
+        ui = strtoul(pvalue, &ptr, 10);
+        if ( *ptr != 0x0){
+            printf("Error : pin must be an unsigned integer\n");
+        } else if ( !(ui <=29 or ui ==255)) {
+            printf("Error : pin must be in range 0/29 or 255\n");
+        } else {    
+            config.pinE220Busy = ui;
+            printf("Pin for E220 busy = %u\n" , config.pinE220Busy );
+            return 1;
+        }
+    }
 
+    // change pinHigh
+    if ( strcmp("HIGH", pkey) == 0 ) { 
+        ui = strtoul(pvalue, &ptr, 10);
+        if ( *ptr != 0x0){
+            printf("Error : pin must be an unsigned integer\n");
+        } else if ( !(ui <=29 or ui ==255)) {
+            printf("Error : pin must be in range 0/29 or 255\n");
+        } else {    
+            config.pinHigh = ui;
+            printf("Pin to output level High = %u\n" , config.pinHigh );
+            return 1;
+        }
+    }
+
+    // change pinLow
+    if ( strcmp("LOW", pkey) == 0 ) { 
+        //printf("Test from LOW cmd\n" );
+        //printf(pkey);
+        //printf(pvalue);
+        ui = strtoul(pvalue, &ptr, 10);
+        if ( *ptr != 0x0){
+            printf("Error : pin must be an unsigned integer\n");
+        } else if ( !(ui <=29 or ui ==255)) {
+            printf("Error : pin must be in range 0/29 or 255\n");
+        } else {    
+            config.pinLow = ui;
+            printf("Pin to output level Low = %u\n" , config.pinLow );
+            return 1;
+        }
+    }
+
+    // restore default
+    if ( strcmp("DEFAULT", pkey) == 0 ) { 
+        fillConfigWithDefault();
+        printf("Config has been restored with default values from config.h\n" );
+        return 1;
+    }
 
     // get Sequencer definition
     if ( strcmp("SEQ", pkey) == 0 ) { 
@@ -1222,12 +1442,12 @@ void processCmd(){
             seq.defsMax=0;
             seq.stepsMax=0;
             //sequencerIsValid=false;
-            updateConfig = true;
+            return 1;
             printf("All definitions for sequencer are deleted\n");
         } else {    
             if (getAllSequencers()){ // true when valid syntax is decoded and seq structure has been updated ;
                                   // we will save the structure and reboot; during reboot we will check if config is valid
-                updateConfig = true;
+                return 1;
             } else {
                 printf("\nError in syntax or in a parameter: command SEQ= is discarded\n");
             }
@@ -1243,7 +1463,7 @@ void processCmd(){
         }
         if (getStepsSequencers()){ // true when valid syntax is decoded and step structure has been updated (not yet the seqDatas[] table);
                                   // we will save the structure and reboot; during reboot we will check if config is valid
-            updateConfig = true;
+            return 1;
         } else { 
             // in case of error, we just discard the command
             printf("\nError in syntax or in a parameter: command STEP= is discarded\n");
@@ -1252,6 +1472,14 @@ void processCmd(){
     }
     */
     
+    // Dump all parameters in a way they can be used with copy/paste
+    if ( strcmp("DUMP", pkey) == 0 ) { 
+        printf("Dump of the config; can be used to copy, edit, paste\n");
+        dumpConfig();
+        return 0;
+    }   
+
+
     // save the config
     if ( strcmp("SAVE", pkey) == 0 ) { 
         saveConfig();
@@ -1262,35 +1490,55 @@ void processCmd(){
         sleep_ms(1000);
         watchdog_reboot(0, 0, 100); // this force a reboot!!!!!!!!!!
         sleep_ms(5000);
-        printf("OXS did not rebooted after 5000 ms\n");
+        printf("oXs did not reboot after 5000 ms\n");
     }   
 
-    if (updateConfig) {
-        printf("config has not yet been saved; use SAVE command to save it!!\n");  
-        
-        configIsSaved = false;    //set a flag to say that config must still be saved
-        // disable interrupt to avoid having error msg about queue being full because part of main loop is not executed
-        uart_set_irq_enables(CRSF_UART_ID, false, false);
-        uart_set_irq_enables(CRSF2_UART_ID, false, false);
-        uart_set_irq_enables(SBUS_UART_ID, false, false);
-        uart_set_irq_enables(SBUS2_UART_ID, false, false);
-        // there are 3 irq used from pio/sm: pio0+sm1, pio0+sm3 ,  pio1+sm0
-        pio_set_irq0_source_enabled(pio0 ,  pis_sm1_rx_fifo_not_empty , false ); // pio/sm for Exbus, Hott, ibus,Mpx,sport, srxl2
-        pio_set_irq1_source_enabled(pio0 ,  pis_sm3_rx_fifo_not_empty , false ); // pio/sm for ESC
-        pio_set_irq0_source_enabled(pio1 ,  pis_sm0_rx_fifo_not_empty , false ); // pio/sm for GPS
-    }
         
     if ( strcmp("N", pkey) == 0 ) {
         nextSimuSeqChVal();
-        return;
+        return 0;
     }    
-    if ( strcmp("A", pkey) == 0 ) printAttitudeFrame(); // print Attitude frame with vario data
-    if ( strcmp("G", pkey) == 0 ) printGpsFrame();      // print GPS frame
-    if ( strcmp("B", pkey) == 0 ) printBatteryFrame();   // print battery frame 
+    if ( strcmp("A", pkey) == 0 ) { printAttitudeFrame() ; return 0; }// print Attitude frame with vario data
+    if ( strcmp("G", pkey) == 0 )  { printGpsFrame();  return 0; }      // print GPS frame
+    if ( strcmp("B", pkey) == 0 )  { printBatteryFrame();  return 0; }  // print battery frame 
+    if ( strcmp("DEBUG", pkey) == 0 ){
+        if (strcmp("DEL", pvalue) == 0) {
+            debugFlags = 0 ; 
+             
+        } else if (strcmp("HELP", pvalue) == 0) {
+            printDebugHelp();             
+        } else if (strcmp("LOCATOR", pvalue) == 0) {
+            debugFlags |= 1 << DEBUG_LORA ;
+        } else {
+            printf("Invalid parameter for DEBUG command");
+            return -1;
+        }
+        printDebugFlags(); 
+        return 0;  
+    }
+
     //printConfigAndSequencers();                                       // print the current config
-    printf("\n >> \n");
+    //printf("\n");
+    return -1;
 }
 
+void printDebugHelp(){
+    printf("Enter commands with DEBUG=XXXX where XXXX is:\n");
+    printf("LOCATOR, ESC\n");
+}
+
+void printDebugFlags(){
+    if (debugFlags==0) {
+        printf("All debug messages are disabled\n");
+        return;
+    }
+    printf("Debug messages are activated for:\n");
+    for (uint8_t i=0; i < DEBUG_MAX_NUMBER; i++){
+        if(debugFlags & (1<<i)) {
+            printf("%s\n", debugMsg[i]);
+        }    
+    }
+}
 
 void addPinToCount(uint8_t pinId){
     if ( pinId != 255) {
@@ -1332,6 +1580,11 @@ void checkConfigAndSequencers(){     // set configIsValid
     addPinToCount(config.pinSpiSck);
     addPinToCount(config.pinSpiMosi);
     addPinToCount(config.pinSpiMiso);
+    addPinToCount(config.pinHigh);
+    addPinToCount(config.pinLow);
+    addPinToCount(config.pinE220Busy );
+    
+    
     for (uint8_t i = 0 ; i<seq.defsMax ; i++) {
         if (seq.defs[i].pin > 29 ) {
             printf("Error in sequencer: one pin number is %u : it must be <30", seq.defs[i].pin);
@@ -1382,6 +1635,7 @@ void checkConfigAndSequencers(){     // set configIsValid
         configIsValid=false;
     }
     if ( config.protocol != 'E' && config.protocol != 'F' && config.protocol != 'L' &&
+         config.protocol != 'R' && config.protocol != 'X' && config.protocol != 'T' &&
         ( !(config.pinPrimIn == 5 or config.pinPrimIn == 21 or config.pinPrimIn == 9 or config.pinPrimIn ==25 or config.pinPrimIn ==255))) {
             printf("Error : PRI pin must be 5 ,21 , 9 , 25 or 255 for most protocols (except Exbus, Fbus and SRXL2)\n");
             configIsValid=false;
@@ -1444,9 +1698,9 @@ void checkConfigAndSequencers(){     // set configIsValid
     //    printf("Error in parameters: When gpio is defined for ESC, parameter about number of temperature (TEMP) must be 0 or 255\n");
     //    configIsValid=false;
     //}    
-    if ( (config.pinEsc != 255) && (config.escType!=HW3) && (config.escType!=HW4) && \
-            (config.escType!=KONTRONIK) && (config.escType!=ZTW1) && (config.escType!=BLH)) {
-        printf("Error in parameters: When gpio is defined for ESC, esc type must be HW4, ZTW1, KON or BLH\n");
+    if ( (config.pinEsc != 255) && (config.escType!=HW3) && (config.escType!=HW4) && (config.escType!=HW5) && \
+            (config.escType!=KONTRONIK) && (config.escType!=ZTW1) && (config.escType!=BLH) && (config.escType!=JETI_ESC) ) {
+        printf("Error in parameters: When gpio is defined for ESC, esc type must be HW4, HW5, ZTW1, KON or BLH or JETI\n");
         configIsValid=false;
     }    
     if ( (config.pwmHz < 50) || (config.pwmHz > 333)){
@@ -1455,7 +1709,6 @@ void checkConfigAndSequencers(){     // set configIsValid
     }    
     if ((config.gyroChanControl != 255) and ( config.gyroChan[0]==255 or config.gyroChan[1]==255 or config.gyroChan[2]==255)){
         printf("Error in parameters: when gyro mode/gain Rc channel is defined (not 255), Rc channels must also be defined for Roll, Pitch and Yaw).\n");
-        
         configIsValid=false;
     }
     if ((config.gyroChanControl != 255) and ( config.pinScl==255 or config.pinSda==255)){
@@ -1486,9 +1739,8 @@ void checkConfigAndSequencers(){     // set configIsValid
             orientationIsWrong= true;
         }
     }
-    if ((config.pinSpiCs != 255) && (config.pinSpiSck==255 or config.pinSpiMosi==255 or config.pinSpiMiso==255)){
-																				
-        printf("Error in parameters: when SPI_CS is not 255, then SPI_CS, SPI_MOSI and SPI_MISO must all be defined (different from 255)\n");
+    if ((config.pinSpiCs != 255) && (config.pinSpiSck==255 or config.pinSpiMosi==255 or config.pinSpiMiso==255 or config.pinE220Busy==255)){
+        printf("Error in parameters: when SPI_CS is not 255, then SPI_CS, SPI_MOSI, SPI_MISO and SPI_BUSY must all be defined (different from 255)\n");
         configIsValid=false;    
     }
 /* Add I2C Protocols */
@@ -1517,7 +1769,13 @@ void checkConfigAndSequencers(){     // set configIsValid
         printf("Error in parameters: For Hitec, TLM pin must be defined\n");
         configIsValid=false;
     }
-/* Add I2C Protocols */
+    if ((config.protocol == 'R' || config.protocol == 'X' || config.protocol == 'T') &&
+        config.pinPrimIn != 255 && config.pinTlm != 255 &&
+        config.pinPrimIn != config.pinTlm + 1) {
+        printf("Error in parameters: PRI (SCL0) must be TLM (SDA0) + 1 for I2C0\n");
+        configIsValid = false;
+    }
+/* Add I2C Protocols */					   
 /* Add Camera */
     if ( (config.CamPitchChannel != 255 and config.CamRollChannel==255) or 
          (config.CamRollChannel != 255 and config.CamPitchChannel==255) or
@@ -1526,7 +1784,8 @@ void checkConfigAndSequencers(){     // set configIsValid
         printf("Error in parameters: PITCH, ROLL, PRATIO and RRATIO must both be defined or unused\n");
         configIsValid=false;
     }
-/* Add Camera */				
+/* Add Camera */
+
     checkSequencers();
     if ( configIsValid == false) {
         printf("\nAttention: error in config parameters\n");
@@ -1554,8 +1813,7 @@ void printConfigAndSequencers(){   // print all and perform checks
     isPrinting = true;
     uint8_t version[] =   VERSION ;
     printf("\nVersion = %s \n", version)  ;
-    printf("    Function                GPIO  Change entering XXX=yyy (yyy=255 to disable)\n");
-
+    printf("    Function                GPIO  Change entering XXX=yyy (yyy=255 to disable)\n");   
 /* Add I2C Protocols */
     if ((config.protocol == 'R') || (config.protocol == 'X') || (config.protocol == 'T'))
     {
@@ -1575,7 +1833,6 @@ void printConfigAndSequencers(){   // print all and perform checks
         printf("Telemetry . . . . . . . . = %4u  (TLM     = 0, 1, 2, ..., 29)\n", config.pinTlm);       
     }
 /* Add I2C Protocols */
-
     printf("GPS Rx  . . . . . . . . . = %4u  (GPS_RX  = 0, 1, 2, ..., 29)\n", config.pinGpsRx );
     printf("GPS Tx  . . . . . . . . . = %4u  (GPS_TX  = 0, 1, 2, ..., 29)\n", config.pinGpsTx );
     printf("Sbus OUT  . . . . . . . . = %4u  (SBUS_OUT= 0, 1, 2, ..., 29)\n", config.pinSbusOut );
@@ -1588,24 +1845,31 @@ void printConfigAndSequencers(){   // print all and perform checks
     printf("PWM Channels 13,14,15,16  = %4u %4u %4u %4u\n", config.pinChannels[12] , config.pinChannels[13] , config.pinChannels[14] , config.pinChannels[15]);
     printf("Voltage 1, 2, 3, 4        = %4u %4u %4u %4u (V1 / V4 = 26, 27, 28, 29)\n", config.pinVolt[0] , config.pinVolt[1], config.pinVolt[2] , config.pinVolt[3]);
     printf("RGB led . . . . . . . . . = %4u  (RGB    = 0, 1, 2, ..., 29)\n", config.pinLed);
-    printf("Camera  P,R,PR,RR         = %4u %4u %4u %4u (PITCH, ROLL, PRATIO, RRATIO  = 1 to 16)\n", config.CamPitchChannel , config.CamRollChannel, config.CamPitchRatio , config.CamRollRatio);
+    printf("Camera  P,R,PR,RR         = %4u %4u %4u %4u (PITCH, ROLL, PRATIO, RRATIO  = 1 to 16)\n", config.CamPitchChannel , config.CamRollChannel, config.CamPitchRatio , config.CamRollRatio);																																															 
     printf("Logger  . . . . . . . . . = %4u  (LOG    = 0, 1, 2, ..., 29)\n", config.pinLogger );
     printf("ESC . . . . . . . . . . . = %4u  (ESC_PIN= 0, 1, 2, ..., 29)\n", config.pinEsc );
     printf("Locator CS  . . . . . . . = %4u  (SPI_CS = 0, 1, 2, ..., 29)\n", config.pinSpiCs );
     printf("        SCK . . . . . . . = %4u  (SPI_SCK= 10, 14, 26)\n", config.pinSpiSck );
     printf("        MOSI  . . . . . . = %4u  (SPI_MOSI=11, 15, 27)\n", config.pinSpiMosi );
     printf("        MISO  . . . . . . = %4u  (SPI_MISO=8, 12, 24, 28)\n", config.pinSpiMiso );
-    
+    printf("        BUSY  . . . . . . = %4u  (SPI_BUSY=0, 1, 2, ..., 29)\n", config.pinE220Busy );
+    printf("Output level High . . . . = %4u  (HIGH = 0, 1, 2, ..., 29)\n", config.pinHigh );
+    printf("Output level Low  . . . . = %4u  (LOW  = 0, 1, 2, ..., 29)\n", config.pinLow );
+    printf("\n");
     if (config.escType == HW4) {
         printf("    Esc type is HW4 (Hobbywing V4)\n")  ;
     } else if (config.escType == HW3) {
         printf("Esc type is HW3 (Hobbywing V3)\n")  ;
+    } else if (config.escType == HW5) {
+        printf("Esc type is HW5 (Hobbywing V5)\n")  ;
     } else if (config.escType == KONTRONIK) {
         printf("Esc type is KON (Kontronik)\n")  ;
     } else if (config.escType == ZTW1) {
         printf("Esc type is ZTW1 (ZTW mantis)\n")  ;
     } else if (config.escType == BLH) {
         printf("Esc type is BLH (BlHeli)\n")  ;
+    } else if (config.escType == JETI_ESC) {
+        printf("Esc type is JETI (Jeti)\n")  ;
     } else {
         printf("Esc type is not defined\n")  ;
     }    
@@ -1631,6 +1895,8 @@ void printConfigAndSequencers(){   // print all and perform checks
             printf("\nProtocol is Fbus(Frsky)\n")  ;    
         } else if (config.protocol == 'L'){
             printf("\nProtocol is SRXL2 (Spektrum)\n")  ;    
+        } else if (config.protocol == 'B'){
+            printf("\nProtocol is Frsky Hub\n")  ;    
 /* Add I2C Protocols */
         } else if (config.protocol == 'R'){
             printf("\nProtocol is RadioLink (use PRI and TLM as I2C0 port)\n")  ; 
@@ -1658,15 +1924,15 @@ void printConfigAndSequencers(){   // print all and perform checks
     }
     printf("RPM multiplier = %f\n", config.rpmMultiplicator);
     if (baro1.baroInstalled) {
-        printf("Baro sensor is detected using MS5611\n")  ;
+        printf("Baro sensor is detected using MS5611 at I2c adress %x\n", baro1._address)  ;
         printf("    Sensitivity min = %i (at %i)   , max = %i (at %i)\n", SENSITIVITY_MIN, SENSITIVITY_MIN_AT, SENSITIVITY_MAX, SENSITIVITY_MAX_AT);
         printf("    Hysteresis = %i \n", VARIOHYSTERESIS);        
     } else if (baro2.baroInstalled) {
-        printf("Baro sensor is detected using SPL06\n")  ;
+        printf("Baro sensor is detected using SPL06 at I2c adress %x\n", baro2._address)  ;
         printf("    Sensitivity min = %i (at %i)   , max = %i (at %i)\n", SENSITIVITY_MIN, SENSITIVITY_MIN_AT, SENSITIVITY_MAX, SENSITIVITY_MAX_AT);
         printf("    Hysteresis = %i \n", VARIOHYSTERESIS);        
     } else if (baro3.baroInstalled) {
-        printf("Baro sensor is detected using BMP280\n")  ;
+        printf("Baro sensor is detected using BMP280 at I2c adress %x\n", baro3._address)  ;
         printf("    Sensitivity min = %i (at %i)   , max = %i (at %i)\n", SENSITIVITY_MIN, SENSITIVITY_MIN_AT, SENSITIVITY_MAX, SENSITIVITY_MAX_AT);
         printf("    Hysteresis = %i \n", VARIOHYSTERESIS);        
     } else {
@@ -1677,7 +1943,7 @@ void printConfigAndSequencers(){   // print all and perform checks
     } else if (sdp3x.airspeedInstalled) {
         printf("Airspeed sensor is detected using SDP3X\n")  ;
     } else if (xgzp.airspeedInstalled) {
-        printf("Airspeed sensor is detected using XGZP....\n")  ; 
+        printf("Airspeed sensor is detected using XGZP....\n")  ;
     } else {
         printf("Airspeed sensor is not detected\n")  ;
     } 
@@ -1711,7 +1977,7 @@ void printConfigAndSequencers(){   // print all and perform checks
 
     if (config.gpsType == 'U'){
             printf("Foreseen GPS type is Ublox (configured by oXs) :")  ;
-        } else if (config.gpsType == 'C'){
+        } else if (config.gpsType == 'E'){
             printf("Foreseen GPS type is Ublox (configured externally) :")  ;
         } else if (config.gpsType == 'C'){
             printf("Foreseen GPS type is CADIS  :")  ;
@@ -1775,24 +2041,28 @@ void printConfigAndSequencers(){   // print all and perform checks
     }    
     if (config.pinSpiCs != 255){
         if (locatorInstalled ){
-            printf("Lora module for locator is detected\n")  ;
+            printf("Lora module for locator is detected\n")  ;   
         } else {
-            printf("Lora module for locator is not detected\n")  ;   
+            if ( loraState == LORA_TO_INIT) {
+                printf("Lora module for locator is not yet detected\n")  ;   
+            } else {
+                printf("Lora module for locator is not detected\n")  ;
+            }
         }     
     }
-    if ( config.CamPitchChannel !=255 && config.CamRollChannel !=255 && config.CamPitchRatio !=255 && config.CamRollRatio !=255) {
-
-    #if defined(GYRO_PITCH_CHANNEL) && defined(GYRO_ROLL_CHANNEL) && defined(GYRO_ROLL2_CHANNEL)
-        printf("Uncomment GYRO_PITCH_CHANNEL, GYRO_ROLL_CHANNEL, GYRO_ROLL2_CHANNEL and GYRO_YAW_CHANNEL into the param.cpp file\n");
-    #else
-        printf("Stabilized Camera is ready\n");
-    #endif
+    #ifdef KX134_IS_USED
+    if (kx134.kx134Installed){
+        printf("KX134 is installed and uses I2C address %x\n", kx134.i2cAdr);
     } else {
-        printf("Stabilized Camera is not used\n");
-    }
+        printf("KX134 is not detected\n");
+    }    
+    #endif
     if(mpu.mpuInstalled){
         printf("Acc/Gyro is detected using MP6050\n")  ;
-        printf("     Acceleration offsets X, Y, Z = %i , %i , %i\n", config.accOffsetX , config.accOffsetY , config.accOffsetZ);
+        printf("     Acceleration param: ACC= %f %f %f\n", config.accOffX , config.accOffY , config.accOffZ);
+        printf("                              %f %f %f\n", config.accScaleXX , config.accScaleXY ,config.accScaleXZ );
+        printf("                              %f %f %f\n", config.accScaleXY , config.accScaleYY ,config.accScaleYZ );
+        printf("                              %f %f %f\n", config.accScaleXZ , config.accScaleYZ ,config.accScaleZZ );
         printf("     Gyro offsets         X, Y, Z = %i , %i , %i\n", config.gyroOffsetX , config.gyroOffsetY , config.gyroOffsetZ); 
         printf("     Orientation          Horizontal is ");
         uint8_t nameIdx;
@@ -1805,7 +2075,7 @@ void printConfigAndSequencers(){   // print all and perform checks
         printf(mpuOrientationNames[nameIdx] );
         printf("\n"); 
     } else {
-       printf("Acc/Gyro is not detected\n")  ;     
+       printf("Acc/Gyro (MP6050) is not detected\n")  ;     
     }
     printGyro();
     watchdog_update(); //sleep_ms(500);
@@ -1817,13 +2087,18 @@ void printConfigAndSequencers(){   // print all and perform checks
 } // end printConfigAndSequencers()
 
 
-#define FLASH_CONFIG_OFFSET (256 * 1024)
+// RP2040-Zero has 2 MB flash. Reserve the LAST three 4-KB sectors.
+// Old 256-KB offset overlaps current oXs firmware. Do not restore it.
+#define OXS_FLASH_BYTES (2u * 1024u * 1024u)
+#define FLASH_CONFIG_OFFSET (OXS_FLASH_BYTES - 3u * FLASH_SECTOR_SIZE)
 const uint8_t *flash_target_contents = (const uint8_t *) (XIP_BASE + FLASH_CONFIG_OFFSET);
 
 void saveConfig() {
     //sleep_ms(1000); // let some printf to finish
     uint8_t buffer[FLASH_PAGE_SIZE] ;
     memset(buffer, 0xff, FLASH_PAGE_SIZE);
+    static_assert(sizeof(config) <= FLASH_PAGE_SIZE,
+                  "CONFIG exceeds one FLASH_PAGE_SIZE; change saveConfig format");
     memcpy(&buffer[0], &config, sizeof(config));
     printf("size of config is %i\n", sizeof(config));
     // Note that a whole number of sectors must be erased at a time.
@@ -1872,153 +2147,188 @@ void removeTrailingWhiteSpace( char * str)
 		*cp-- = '\0';
 }
 
+void fillConfigWithDefault(){
+    config.version = CONFIG_VERSION;
+    config.pinChannels[0] = _pinChannels_1;
+    config.pinChannels[1] = _pinChannels_2;
+    config.pinChannels[2] = _pinChannels_3;
+    config.pinChannels[3] = _pinChannels_4;
+    config.pinChannels[4] = _pinChannels_5;
+    config.pinChannels[5] = _pinChannels_6;
+    config.pinChannels[6] = _pinChannels_7;
+    config.pinChannels[7] = _pinChannels_8;
+    config.pinChannels[8] = _pinChannels_9;
+    config.pinChannels[9] = _pinChannels_10;
+    config.pinChannels[10] = _pinChannels_11;
+    config.pinChannels[11] = _pinChannels_12;
+    config.pinChannels[12] = _pinChannels_13;
+    config.pinChannels[13] = _pinChannels_14;
+    config.pinChannels[14] = _pinChannels_15;
+    config.pinChannels[15] = _pinChannels_16;
+    config.pinGpsTx = _pinGpsTx;
+    config.pinGpsRx = _pinGpsRx;
+    config.pinPrimIn = _pinPrimIn;
+    config.pinSecIn = _pinSecIn; 
+    config.pinSbusOut = _pinSbusOut;
+    config.pinTlm = _pinTlm;
+    config.pinVolt[0] = _pinVolt_1;
+    config.pinVolt[1] = _pinVolt_2;
+    config.pinVolt[2] = _pinVolt_3;
+    config.pinVolt[3] = _pinVolt_4;
+    config.pinSda = _pinSda;
+    config.pinScl = _pinScl;
+    config.pinRpm = _pinRpm;
+    config.pinLed = _pinLed;
+    config.protocol = _protocol; // default = sport
+    config.crsfBaudrate = _crsfBaudrate;
+    config.scaleVolt1 = _scaleVolt1;
+    config.scaleVolt2 = _scaleVolt2;
+    config.scaleVolt3 = _scaleVolt3;
+    config.scaleVolt4 = _scaleVolt4;
+    config.offset1 = _offset1;
+    config.offset2 = _offset2;
+    config.offset3 = _offset3;
+    config.offset4 = _offset4;
+    config.gpsType = _gpsType ;
+    config.rpmMultiplicator = _rpmMultiplicator;
+    //config.gpio0 = 0;
+    //config.gpio1 = 1;
+    //config.gpio5 = 6;
+    //config.gpio11 = 11;
+    config.failsafeType = _failsafeType;
+    config.failsafeChannels.ch0 = 1<<10 ; // set default failsafe value to 1/2 of 11 bits
+    config.failsafeChannels.ch1 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch2 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch3 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch4 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch6 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch6 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch7 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch8 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch9 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch10 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch11 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch12 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch13 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch14 = config.failsafeChannels.ch0 ;
+    config.failsafeChannels.ch15 = config.failsafeChannels.ch0 ;
+    config.accOffsetX = 0;
+    config.accOffsetY = 0;
+    config.accOffsetZ = 0;
+    config.gyroOffsetX = 0;
+    config.gyroOffsetY = 0;
+    config.gyroOffsetZ= 0;
+    config.temperature = _temperature;
+    config.VspeedCompChannel = _VspeedCompChannel;
+    config.ledInverted = _ledInverted; 
+    config.pinLogger = _pinLogger;
+    config.loggerBaudrate =_loggerBaudrate;
+    config.pinEsc = _pinEsc ;
+    config.escType = _escType; 
+    config.pwmHz = _pwmHz;
+    config.gyroChanControl = _gyroChanControl ; // Rc channel used to say if gyro is implemented or not and to select the mode and the general gain. Value must be in range 1/16 or 255 (no gyro)
+    config.gyroChan[0] = _gyroChan_AIL;
+    config.gyroChan[1] = _gyroChan_ELV;
+    config.gyroChan[2] = _gyroChan_RUD;
+    config.vr_gain[0]  = _vr_gain_AIL;
+    config.vr_gain[1]  = _vr_gain_ELV;
+    config.vr_gain[2]  = _vr_gain_RUD;
+    config.stick_gain_throw = (enum STICK_GAIN_THROW)_stick_gain_throw;
+    config.max_rotate = (MAX_ROTATE)_max_rotate;
+    config.rate_mode_stick_rotate = (enum RATE_MODE_STICK_ROTATE)_rate_mode_stick_rotate;
+    config.gyroAutolevel = _gyroAutolevel;
+    config.mpuOrientationH = _mpuOrientationH;
+    config.mpuOrientationV = _mpuOrientationV;
+    config.pid_param_rate.output_shift = _pid_param_rate_output_shift;
+    config.pid_param_hold.output_shift = _pid_param_hold_output_shift;
+    config.pid_param_stab.output_shift = _pid_param_stab_output_shift;
+    config.pid_param_rate.kp[0] =  _pid_param_rate_KP_AIL;
+    config.pid_param_rate.kp[1] =  _pid_param_rate_KP_ELV;
+    config.pid_param_rate.kp[2] =  _pid_param_rate_KP_RUD;
+    config.pid_param_hold.kp[0] =  _pid_param_hold_KP_AIL;
+    config.pid_param_hold.kp[1] =  _pid_param_hold_KP_ELV;
+    config.pid_param_hold.kp[2] =  _pid_param_hold_KP_RUD;
+    config.pid_param_stab.kp[0] =  _pid_param_stab_KP_AIL;
+    config.pid_param_stab.kp[1] =  _pid_param_stab_KP_ELV;
+    config.pid_param_stab.kp[2] =  _pid_param_stab_KP_RUD;
+        
+    config.pid_param_rate.ki[0] =  _pid_param_rate_KI_AIL;
+    config.pid_param_rate.ki[1] =  _pid_param_rate_KI_ELV;
+    config.pid_param_rate.ki[2] =  _pid_param_rate_KI_RUD;
+    config.pid_param_hold.ki[0] =  _pid_param_hold_KI_AIL;
+    config.pid_param_hold.ki[1] =  _pid_param_hold_KI_ELV;
+    config.pid_param_hold.ki[2] =  _pid_param_hold_KI_RUD;
+    config.pid_param_stab.ki[0] =  _pid_param_stab_KI_AIL;
+    config.pid_param_stab.ki[1] =  _pid_param_stab_KI_ELV;
+    config.pid_param_stab.ki[2] =  _pid_param_stab_KI_RUD;
+    
+    config.pid_param_rate.kd[0] =  _pid_param_rate_KD_AIL;
+    config.pid_param_rate.kd[1] =  _pid_param_rate_KD_ELV;
+    config.pid_param_rate.kd[2] =  _pid_param_rate_KD_RUD;
+    config.pid_param_hold.kd[0] =  _pid_param_hold_KD_AIL;
+    config.pid_param_hold.kd[1] =  _pid_param_hold_KD_ELV;
+    config.pid_param_hold.kd[2] =  _pid_param_hold_KD_RUD;
+    config.pid_param_stab.kd[0] =  _pid_param_stab_KD_AIL;
+    config.pid_param_stab.kd[1] =  _pid_param_stab_KD_ELV;
+    config.pid_param_stab.kd[2] =  _pid_param_stab_KD_RUD;
+
+    config.pinSpiCs = _pinSpiCs;
+    config.pinSpiSck = _pinSpiSck;
+    config.pinSpiMosi = _pinSpiMosi;
+    config.pinSpiMiso = _pinSpiMiso;
+    config.pinE220Busy = _pinE220Busy;
+
+    config.accOffX = _accOffX;
+    config.accOffY = _accOffY;
+    config.accOffZ = _accOffZ;
+    config.accScaleXX = _accScaleXX;
+    config.accScaleYY = _accScaleYY;
+    config.accScaleZZ = _accScaleZZ;
+    config.accScaleXY = _accScaleXY;
+    config.accScaleXZ = _accScaleXZ;
+    config.accScaleYZ = _accScaleYZ;
+
+    config.pinHigh = _pinHigh;
+    config.pinLow = _pinLow;
+}
 void setupConfig(){   // The config is uploaded at power on
     if (*flash_target_contents == CONFIG_VERSION ) {
         memcpy( &config , flash_target_contents, sizeof(config));
         if (config.pwmHz == 0XFFFF) config.pwmHz = _pwmHz; // set default value when it has not been defined manually
-
-    } else {
-        config.version = CONFIG_VERSION;
-        config.pinChannels[0] = _pinChannels_1;
-        config.pinChannels[1] = _pinChannels_2;
-        config.pinChannels[2] = _pinChannels_3;
-        config.pinChannels[3] = _pinChannels_4;
-        config.pinChannels[4] = _pinChannels_5;
-        config.pinChannels[5] = _pinChannels_6;
-        config.pinChannels[6] = _pinChannels_7;
-        config.pinChannels[7] = _pinChannels_8;
-        config.pinChannels[8] = _pinChannels_9;
-        config.pinChannels[9] = _pinChannels_10;
-        config.pinChannels[10] = _pinChannels_11;
-        config.pinChannels[11] = _pinChannels_12;
-        config.pinChannels[12] = _pinChannels_13;
-        config.pinChannels[13] = _pinChannels_14;
-        config.pinChannels[14] = _pinChannels_15;
-        config.pinChannels[15] = _pinChannels_16;
-        config.pinGpsTx = _pinGpsTx;
-        config.pinGpsRx = _pinGpsRx;
-        config.pinPrimIn = _pinPrimIn;
-        config.pinSecIn = _pinSecIn; 
-        config.pinSbusOut = _pinSbusOut;
-        config.pinTlm = _pinTlm;
-        config.pinVolt[0] = _pinVolt_1;
-        config.pinVolt[1] = _pinVolt_2;
-        config.pinVolt[2] = _pinVolt_3;
-        config.pinVolt[3] = _pinVolt_4;
-        config.pinSda = _pinSda;
-        config.pinScl = _pinScl;
-        config.pinRpm = _pinRpm;
-        config.pinLed = _pinLed;
-        config.protocol = _protocol; // default = sport
-        config.crsfBaudrate = _crsfBaudrate;
-        config.scaleVolt1 = _scaleVolt1;
-        config.scaleVolt2 = _scaleVolt2;
-        config.scaleVolt3 = _scaleVolt3;
-        config.scaleVolt4 = _scaleVolt4;
-        config.offset1 = _offset1;
-        config.offset2 = _offset2;
-        config.offset3 = _offset3;
-        config.offset4 = _offset4;
-        config.gpsType = _gpsType ;
-        config.rpmMultiplicator = _rpmMultiplicator;
-        //config.gpio0 = 0;
-        //config.gpio1 = 1;
-        //config.gpio5 = 6;
-        //config.gpio11 = 11;
-        config.failsafeType = _failsafeType;
-        config.failsafeChannels.ch0 = 1<<10 ; // set default failsafe value to 1/2 of 11 bits
-        config.failsafeChannels.ch1 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch2 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch3 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch4 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch6 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch6 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch7 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch8 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch9 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch10 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch11 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch12 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch13 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch14 = config.failsafeChannels.ch0 ;
-        config.failsafeChannels.ch15 = config.failsafeChannels.ch0 ;
-        config.accOffsetX = 0;
-        config.accOffsetY = 0;
-        config.accOffsetZ = 0;
-        config.gyroOffsetX = 0;
-        config.gyroOffsetY = 0;
-        config.gyroOffsetZ= 0;
-        config.temperature = _temperature;
-        config.VspeedCompChannel = _VspeedCompChannel;
-        config.ledInverted = _ledInverted; 
-        config.CamPitchChannel = _CamPitchChannel;
-        config.CamRollChannel = _CamRollChannel;
-        config.CamPitchRatio = _CamPitchRatio;
-        config.CamRollRatio = _CamRollRatio;   
-        config.pinLogger = _pinLogger;
-        config.loggerBaudrate =_loggerBaudrate;
-        config.pinEsc = _pinEsc ;
-        config.escType = _escType; 
-        config.pwmHz = _pwmHz;
-        config.gyroChanControl = _gyroChanControl ; // Rc channel used to say if gyro is implemented or not and to select the mode and the general gain. Value must be in range 1/16 or 255 (no gyro)
-        config.gyroChan[0] = _gyroChan_AIL;
-        config.gyroChan[1] = _gyroChan_ELV;
-        config.gyroChan[2] = _gyroChan_RUD;
-        config.vr_gain[0]  = _vr_gain_AIL;
-        config.vr_gain[1]  = _vr_gain_ELV;
-        config.vr_gain[2]  = _vr_gain_RUD;
-        config.stick_gain_throw = (enum STICK_GAIN_THROW)_stick_gain_throw;
-        config.max_rotate = (MAX_ROTATE)_max_rotate;
-        config.rate_mode_stick_rotate = (enum RATE_MODE_STICK_ROTATE)_rate_mode_stick_rotate;
-        config.gyroAutolevel = _gyroAutolevel;
-        config.mpuOrientationH = _mpuOrientationH;
-        config.mpuOrientationV = _mpuOrientationV;
+        if ( ( abs( config.accScaleXY + config.accScaleXZ + config.accScaleYZ) > 0.1) ||
+                ( abs( config.accScaleXX * config.accScaleYY * config.accScaleZZ) > 1.2) ||
+                ( abs( config.accScaleXX * config.accScaleYY * config.accScaleZZ) < 0.8) ) {
+            printf("Stored Acc param are inconsistent; they are replaced by default values\n");
+            printf("Look for performing a calibration\n");            
+            config.accOffX = 0.0;
+            config.accOffY = 0.0;
+            config.accOffZ = 0.0;
+            config.accScaleXX = 1.0;
+            config.accScaleYY = 1.0;
+            config.accScaleZZ = 1.0;
+            config.accScaleXY = 0.0;
+            config.accScaleXZ = 0.0;
+            config.accScaleYZ = 0.0;
+        }
+        // always use the values used in config.h file because there is no usb command to update them.
         config.pid_param_rate.output_shift = _pid_param_rate_output_shift;
         config.pid_param_hold.output_shift = _pid_param_hold_output_shift;
         config.pid_param_stab.output_shift = _pid_param_stab_output_shift;
-        config.pid_param_rate.kp[0] =  _pid_param_rate_KP_AIL;
-        config.pid_param_rate.kp[1] =  _pid_param_rate_KP_ELV;
-        config.pid_param_rate.kp[2] =  _pid_param_rate_KP_RUD;
-        config.pid_param_hold.kp[0] =  _pid_param_hold_KP_AIL;
-        config.pid_param_hold.kp[1] =  _pid_param_hold_KP_ELV;
-        config.pid_param_hold.kp[2] =  _pid_param_hold_KP_RUD;
-        config.pid_param_stab.kp[0] =  _pid_param_stab_KP_AIL;
-        config.pid_param_stab.kp[1] =  _pid_param_stab_KP_ELV;
-        config.pid_param_stab.kp[2] =  _pid_param_stab_KP_RUD;
-            
-        config.pid_param_rate.ki[0] =  _pid_param_rate_KI_AIL;
-        config.pid_param_rate.ki[1] =  _pid_param_rate_KI_ELV;
-        config.pid_param_rate.ki[2] =  _pid_param_rate_KI_RUD;
-        config.pid_param_hold.ki[0] =  _pid_param_hold_KI_AIL;
-        config.pid_param_hold.ki[1] =  _pid_param_hold_KI_ELV;
-        config.pid_param_hold.ki[2] =  _pid_param_hold_KI_RUD;
-        config.pid_param_stab.ki[0] =  _pid_param_stab_KI_AIL;
-        config.pid_param_stab.ki[1] =  _pid_param_stab_KI_ELV;
-        config.pid_param_stab.ki[2] =  _pid_param_stab_KI_RUD;
         
-        config.pid_param_rate.kd[0] =  _pid_param_rate_KD_AIL;
-        config.pid_param_rate.kd[1] =  _pid_param_rate_KD_ELV;
-        config.pid_param_rate.kd[2] =  _pid_param_rate_KD_RUD;
-        config.pid_param_hold.kd[0] =  _pid_param_hold_KD_AIL;
-        config.pid_param_hold.kd[1] =  _pid_param_hold_KD_ELV;
-        config.pid_param_hold.kd[2] =  _pid_param_hold_KD_RUD;
-        config.pid_param_stab.kd[0] =  _pid_param_stab_KD_AIL;
-        config.pid_param_stab.kd[1] =  _pid_param_stab_KD_ELV;
-        config.pid_param_stab.kd[2] =  _pid_param_stab_KD_RUD;
-
-        config.pinSpiCs = _pinSpiCs;
-        config.pinSpiSck = _pinSpiSck;
-        config.pinSpiMosi = _pinSpiMosi;
-        config.pinSpiMiso = _pinSpiMiso;
-
+    } else {
+        fillConfigWithDefault();
     }
             
 } 
 
 void printConfigOffsets(){
     printf("\nOffset Values in config:\n");
-	printf("Acc. X = %d, Y = %d, Z = %d\n", (int) config.accOffsetX , (int) config.accOffsetY, (int) config.accOffsetZ);    
-    printf("Gyro. X = %d, Y = %d, Z = %d\n", (int) config.gyroOffsetX , (int) config.gyroOffsetY, (int) config.gyroOffsetZ);
+	printf("     Acceleration param: ACC= %f %f %f\n", config.accOffX , config.accOffY , config.accOffZ);
+    printf("                              %f %f %f\n", config.accScaleXX , config.accScaleXY ,config.accScaleXZ );
+    printf("                              %f %f %f\n", config.accScaleXY , config.accScaleYY ,config.accScaleYZ );
+    printf("                              %f %f %f\n", config.accScaleXZ , config.accScaleYZ ,config.accScaleZZ );
+    printf("     Gyro offsets         X, Y, Z = %i , %i , %i\n", config.gyroOffsetX , config.gyroOffsetY , config.gyroOffsetZ); 
+    //    printf("Gyro. X = %d, Y = %d, Z = %d\n", (int) config.gyroOffsetX , (int) config.gyroOffsetY, (int) config.gyroOffsetZ);
 }
 
 void printFieldValues(){
@@ -2396,15 +2706,21 @@ void printSequencers(){
 
 void saveSequencers() {
     //sleep_ms(1000); // let some printf to finish
-    //uint8_t buffer[FLASH_PAGE_SIZE] = {0xff};
-    //memcpy(&buffer[0], &seq, sizeof(seq));
+    // flash_range_program requires a multiple of FLASH_PAGE_SIZE (256 bytes).
+    constexpr size_t programSize =
+        ((sizeof(seq) + FLASH_PAGE_SIZE - 1) / FLASH_PAGE_SIZE) * FLASH_PAGE_SIZE;
+    static_assert(programSize <= FLASH_SECTOR_SIZE,
+                  "Sequencer data exceeds reserved flash sector");
+    uint8_t buffer[programSize];
+    memset(buffer, 0xff, sizeof(buffer));
+    memcpy(buffer, &seq, sizeof(seq));
     // Note that a whole number of sectors must be erased at a time.
     // irq must be disable during flashing
     watchdog_enable(5000 , true);
     if ( multicoreIsRunning) multicore_lockout_start_blocking();
     uint32_t irqStatus = save_and_disable_interrupts();
     flash_range_erase(FLASH_SEQUENCER_OFFSET, FLASH_SECTOR_SIZE);
-    flash_range_program(FLASH_SEQUENCER_OFFSET,  (uint8_t*) &seq, sizeof(seq));
+    flash_range_program(FLASH_SEQUENCER_OFFSET, buffer, sizeof(buffer));
     //flash_range_program(FLASH_SEQUENCER_OFFSET,  buffer, FLASH_PAGE_SIZE);
     
     restore_interrupts(irqStatus);
@@ -2692,7 +3008,7 @@ bool parseOneStep(){
 
 void printGyro(){
     if(config.gyroChanControl>16) {
-        printf("\nGyro is not configured\n");
+        printf("\nGyro is not configured (Rc channel used to select the gyro mode/gain is not defined)\n");
         return;
     }
     printf("\nGyro configuration is:\n");
@@ -2726,7 +3042,7 @@ void printGyro(){
 
 void printGyroMixer(){     // this function is also called at the end of the gyroMixer calibration process
     if (gyroMixer.isCalibrated == false){
-        printf("Gyro mixers must be calibrated\n");
+        printf("Gyro mixers must be calibrated (use the gyro learning process - see readme section)\n");
     } else {
         // when calibrated
         printf("\nGyro mixers are calibrated:\n");
@@ -2750,15 +3066,21 @@ const uint8_t *flash_gyroMixer_contents = (const uint8_t *) (XIP_BASE + FLASH_GY
 
 void saveGyroMixer() {
     //sleep_ms(1000); // let some printf to finish
-    //uint8_t buffer[FLASH_PAGE_SIZE] = {0xff};
-    //memcpy(&buffer[0], &seq, sizeof(seq));
+    // Program complete pages; do not pass sizeof(gyroMixer) unpadded.
+    constexpr size_t programSize =
+        ((sizeof(gyroMixer) + FLASH_PAGE_SIZE - 1) / FLASH_PAGE_SIZE) * FLASH_PAGE_SIZE;
+    static_assert(programSize <= FLASH_SECTOR_SIZE,
+                  "Gyro mixer data exceeds reserved flash sector");
+    uint8_t buffer[programSize];
+    memset(buffer, 0xff, sizeof(buffer));
+    memcpy(buffer, &gyroMixer, sizeof(gyroMixer));
     // Note that a whole number of sectors must be erased at a time.
     // irq must be disable during flashing
     watchdog_enable(5000 , true);
     if ( multicoreIsRunning) multicore_lockout_start_blocking();
     uint32_t irqStatus = save_and_disable_interrupts();
     flash_range_erase(FLASH_GYROMIXER_OFFSET, FLASH_SECTOR_SIZE);
-    flash_range_program(FLASH_GYROMIXER_OFFSET,  (uint8_t*) &gyroMixer, sizeof(gyroMixer));
+    flash_range_program(FLASH_GYROMIXER_OFFSET, buffer, sizeof(buffer));
     //flash_range_program(FLASH_SEQUENCER_OFFSET,  buffer, FLASH_PAGE_SIZE);
     
     restore_interrupts(irqStatus);
@@ -2833,3 +3155,173 @@ bool getPid(uint8_t mode){  // get all pid parameters for one mode; return true 
     }
     return true;            
 } 
+
+bool getAccParam(){  // get all Acc parameters ; return true if valid; config is then updated
+    // we expect getting 12 float parameters; all are space delimited
+    char * ptr ;                        // get the pos of first non converted integer 
+    pvalue =  skipWhiteSpace(pvalue);   // skip space at the begining
+    double tempTable[12];
+    uint8_t i = 0;
+    while ( (*ptr != 0x00) && (i < 12)){
+        tempTable[i] = (float) strtod(pvalue,&ptr); // try to convert to double; ptr point to first non converted char. Whitespace are first discarded
+        if (pvalue == ptr) {
+            printf("Error : value %i is not a valid float\n", i+1);
+            return false;
+        } 
+        i++;
+        pvalue = ptr;    
+    }     
+    if (i < 12) {
+        printf("Error : 12 values expected; only %i detected\n", i);
+        return false;
+    }
+    pvalue =  skipWhiteSpace(pvalue);
+    if ( (*pvalue) != 0X00) {
+        printf("Error : more characters than the 12 expected values\n", i);
+        return false;
+    }
+    if ( (tempTable[4] != tempTable[6] ) || (tempTable[5] != tempTable[9] ) || (tempTable[8] != tempTable[10] ) ) {
+        printf("Error : values 5, 6, 9 must be equal respectively to values 7, 10, 11\n", i);
+        return false;        
+    } 
+    config.accOffX = tempTable[0];
+    config.accOffY = tempTable[1];
+    config.accOffZ = tempTable[2];
+    config.accScaleXX = tempTable[3];
+    config.accScaleYY = tempTable[7];
+    config.accScaleZZ = tempTable[11];
+    config.accScaleXY = tempTable[4];
+    config.accScaleXZ = tempTable[5];
+    config.accScaleYZ = tempTable[8];
+    return true;            
+} 
+
+void dumpConfig(){
+    for (uint8_t i = 0 ; i <16 ; i++) {
+        if (config.pinChannels[i] != 255) printf("C%i = %i;\n",i+1 ,config.pinChannels[i] );
+    }
+    if (config.pinGpsTx != 255) printf("GPS_TX = %i;\n", config.pinGpsTx );
+    if (config.pinGpsRx != 255) printf("GPS_RX = %i;\n", config.pinGpsRx );
+    if (config.pinPrimIn != 255) printf("PRI = %i;\n", config.pinPrimIn );
+    if (config.pinSecIn != 255) printf("SEC = %i;\n", config.pinSecIn );
+    if (config.pinSbusOut != 255) printf("SBUS_OUT = %i;\n", config.pinSbusOut );
+    if (config.pinTlm != 255) printf("TLM = %i;\n", config.pinTlm );
+    if (config.pinRpm != 255) printf("RPM = %i;\n", config.pinRpm );
+    if (config.pinSda != 255) printf("SDA = %i;\n", config.pinSda );
+    if (config.pinScl != 255) printf("SCL = %i;\n", config.pinScl );
+    if (config.pinVolt[0] != 255) printf("V1 = %i;\n", config.pinVolt[0] );
+    if (config.pinVolt[1] != 255) printf("V2 = %i;\n", config.pinVolt[1] );
+    if (config.pinVolt[2] != 255) printf("V3 = %i;\n", config.pinVolt[2] );
+    if (config.pinVolt[3] != 255) printf("V4 = %i;\n", config.pinVolt[3] );
+    if (config.pinLed != 255) printf("RGB = %i;\n", config.pinLed );
+    if (config.pinLogger != 255) printf("LOG = %i;\n", config.pinLogger );
+    if (config.pinEsc != 255) printf("ESC_PIN = %i;\n", config.pinEsc );
+    if (config.pinSpiCs != 255) printf("SPI_CS = %i;\n", config.pinSpiCs );
+    if (config.pinSpiSck != 255) printf("SPI_SCK = %i;\n", config.pinSpiSck );
+    if (config.pinSpiMosi != 255) printf("SPI_MOSI = %i;\n", config.pinSpiMosi );
+    if (config.pinSpiMiso != 255) printf("SPI_MISO = %i;\n", config.pinSpiMiso );
+    if (config.pinE220Busy != 255) printf("SPI_BUSY = %i;\n", config.pinE220Busy );   
+    if (config.pinHigh != 255) printf("HIGH = %i;\n", config.pinHigh );
+    if (config.pinLow != 255) printf("LOW = %i;\n", config.pinLow );
+    printf("PROTOCOL = %c;\n", config.protocol );
+    printf("CRSFBAUD = %i;\n", config.crsfBaudrate );
+    if (config.escType == HW4) printf("ESC_TYPE = HW4;\n");
+    if (config.escType == HW3) printf("ESC_TYPE = HW3;\n");
+    if (config.escType == HW5) printf("ESC_TYPE = HW5;\n");
+    if (config.escType == KONTRONIK) printf("ESC_TYPE = KONTRONIK;\n");
+    if (config.escType == ZTW1) printf("ESC_TYPE = ZTW1;\n");
+    if (config.escType == BLH) printf("ESC_TYPE = BLH;\n");
+    if (config.escType == JETI_ESC) printf("ESC_TYPE = JETI;\n");
+
+    if (config.pinLogger  != 255) printf("LOGBAUD = %i;\n", config.loggerBaudrate );
+    if (config.pwmHz != 0XFFFF) printf("PWMHZ = %i;\n", config.pwmHz );
+    printf("SCALE1 = %f; SCALE2 = %f; SCALE3 = %f; SCALE4 = %f; \n", config.scaleVolt1, config.scaleVolt2, config.scaleVolt3, config.scaleVolt4);
+    printf("OFFSET1 = %f; OFFSET2 = %f; OFFSET3 = %f; OFFSET = %f; \n", config.offset1, config.offset2, config.offset3, config.offset4);
+    
+    if (config.temperature != 255) printf("TEMP = %i;\n", config.temperature );
+    if (config.gpsType == 'U') printf("GPS = U;\n");
+    if (config.gpsType == 'E') printf("GPS = E;\n");
+    if (config.gpsType == 'C') printf("GPS = C;\n");
+    
+    if (config.pinRpm != 255) printf("RPM_MULT = %f;\n", config.rpmMultiplicator );
+    if (config.ledInverted == 'I') printf("LED = I;\n");
+
+    if (config.failsafeType == 'H') printf("FAILSAFE = H;\n");
+    if (config.VspeedCompChannel != 255) printf("ACC = %i;\n", config.VspeedCompChannel );
+    if (config.gyroChanControl != 255) {
+        printf("GMG = %i;\n", config.gyroChanControl );
+        if (config.gyroChan[0] != 255) printf("GSA = %i;\n", config.gyroChan[0] );
+        if (config.gyroChan[1] != 255) printf("GSE = %i;\n", config.gyroChan[1] );
+        if (config.gyroChan[2] != 255) printf("GSR = %i;\n", config.gyroChan[2] );
+        printf("GGR = %i;\n", config.vr_gain[0] );
+        printf("GGP = %i;\n", config.vr_gain[1] );
+        printf("GGY = %i;\n", config.vr_gain[2] );
+        printf("GGT = %i;\n", (int) config.stick_gain_throw );
+        printf("GMR = %i;\n", (int) config.max_rotate );
+        printf("GRE = %i;\n", (int) config.rate_mode_stick_rotate );
+        if (config.gyroAutolevel ) printf("GST = ON;\n"); else printf("GST = OFF;\n");
+        printf("PIDN = %i %i %i %i %i %i %i %i %i;\n", config.pid_param_rate.kp[0] , config.pid_param_rate.ki[0] ,config.pid_param_rate.kd[0] ,
+                            config.pid_param_rate.kp[1] , config.pid_param_rate.ki[1] ,config.pid_param_rate.kd[1] ,
+                            config.pid_param_rate.kp[2] , config.pid_param_rate.ki[2] ,config.pid_param_rate.kd[2]  );
+        printf("PIDH = %i %i %i %i %i %i %i %i %i;\n", config.pid_param_hold.kp[0] , config.pid_param_hold.ki[0] ,config.pid_param_hold.kd[0] ,
+                            config.pid_param_hold.kp[1] , config.pid_param_hold.ki[1] ,config.pid_param_hold.kd[1] ,
+                            config.pid_param_hold.kp[2] , config.pid_param_hold.ki[2] ,config.pid_param_hold.kd[2]  );
+        printf("PIDS = %i %i %i %i %i %i %i %i %i;\n", config.pid_param_stab.kp[0] , config.pid_param_stab.ki[0] ,config.pid_param_stab.kd[0] ,
+                            config.pid_param_stab.kp[1] , config.pid_param_stab.ki[1] ,config.pid_param_stab.kd[1] ,
+                            config.pid_param_stab.kp[2] , config.pid_param_stab.ki[2] ,config.pid_param_stab.kd[2]  );
+    
+    }
+    //if (config. != 255) printf(" = %i;\n", config. );
+
+
+}
+/*
+    printf("     PID parameters         PIDx = kpA kiA kdA kpE kiE kdE kpR kiR kdR       x=N(normal), H(hold), S(stab)\n");
+    printf("                                                kp, ki, kd are the values of one PID; A,E,R means for Aileron, Elevator, Rudder\n");
+struct _pid_param {
+  int16_t kp[3]; // [0, 1000] 11b signed    // 3 values because one per axis
+  int16_t ki[3];
+  int16_t kd[3];
+  int8_t output_shift ;
+
+  struct _pid_param pid_param_rate; // each structure store the Kp, Ki, Kd parameters for each of the 3 axis; here for normal mode (= rate)
+    struct _pid_param pid_param_hold; // idem for hold mode
+    struct _pid_param pid_param_stab;  //each structure store the Kp, Ki, Kd parameters for each of the 3 axis; here for stabilize mode (= rate)
+    
+
+    
+    
+    printf("     PID parameters         PIDx = kpA kiA kdA kpE kiE kdE kpR kiR kdR       x=N(normal), H(hold), S(stab)\n");
+    printf("                                                kp, ki, kd are the values of one PID; A,E,R means for Aileron, Elevator, Rudder\n");
+
+    printf("Sequencers                  SEQ = YYYY          See Readme section to see how to fill YYYY\n");
+    printf("                            SEQ = DEL           Erase all sequencer\n");
+
+    printf("Force MPU6050 calibration   MPUCAL = Y          Y = H (Horizontal and still) or V (Vertical=nose up)\n");
+    printf("   Set Acc parameters       MPUACC = x.xx y.yy...  x.xx y.yy are 12 values (with decimal) space separated\n");
+
+        
+        config.accOffsetX = 0;
+        config.accOffsetY = 0;
+        config.accOffsetZ = 0;
+        config.gyroOffsetX = 0;
+        config.gyroOffsetY = 0;
+        config.gyroOffsetZ= 0;
+        config.pid_param_rate.output_shift = _pid_param_rate_output_shift;
+        config.pid_param_hold.output_shift = _pid_param_hold_output_shift;
+        config.pid_param_stab.output_shift = _pid_param_stab_output_shift;
+
+    
+        config.accOffX = _accOffX;
+        config.accOffY = _accOffY;
+        config.accOffZ = _accOffZ;
+        config.accScaleXX = _accScaleXX;
+        config.accScaleYY = _accScaleYY;
+        config.accScaleZZ = _accScaleZZ;
+        config.accScaleXY = _accScaleXY;
+        config.accScaleXZ = _accScaleXZ;
+        config.accScaleYZ = _accScaleYZ;
+
+        
+*/
+//acc= 93.633688 142.927034 -1067.694384  0.993415  0.000002 -0.003749  0.000002  1.000666 0.001992 -0.003749  0.001992 0.998804

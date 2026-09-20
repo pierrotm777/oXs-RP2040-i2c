@@ -12,14 +12,14 @@ This project can be interfaced with 1 or 2 ELRS, FRSKY , HOTT , MPX, FLYSKY , Fu
 - data's (telemetry and/or PWM Rc channels) to be logged on a SD card
 - localisation data's on a second Rf link in order to retrieve a lost model (= locator)
 ### For telemetry, it can provide
-   - up to 4 analog voltages measurement (with scaling and offset) (optional); one voltage is normally used to measure a current and 1 or 2 (optionnaly) for temperature
+   - up to 4 analog voltages measurement (with scaling and offset) (optional); one voltage is normally used to measure a current and 1 or 2 (optionnaly) for temperature(s)
    - one RPM measurement; a scaling (rpmMultiplicator) can be used to take care e.g. of number of blades (optional)
    - the altitude and the vertical speed when connected to a pressure sensor (optional)
    - the airspeed when connected to a differential pressure sensor (and a pitot tube) (optional)
    - compensated vertical speed when connected to a baro + a differentil pressure sensor 
    - Pitch/Roll and accelerations X/Y/Z when conncted to a MP6050 sensor (optional); 
    - GPS data (longitude, latitude, speed, altitude,...) (optional)
-   - rpm/volt/temp/current/consumption from some ESC (Hobbywing4, ZTW mantis, Kontronix, BlHeli)
+   - rpm/volt/temp/current/consumption from some ESC (Hobbywing4, ZTW mantis, Kontronix, BlHeli, Jeti)
    Note: vertical speed is improved when baro sensor is combined with MP6050 sensor.
    
 ### It can also provide up to 16 PWM RC channels to drive servos from a CRSF/ELRS or from 1 or 2 Sbus/Fbus/Exbus/Ibus/SRXL2 signal (e.g Frsky,Jeti,Flysky,Spektrum). The refresh rate can be set between 50Hz(default) and 333Hz.
@@ -63,9 +63,11 @@ This project requires a board with a RP2040 processor (like the rapsberry pi pic
 A better alternative is the RP2040-Zero or the RP2040-TINY (both have the same processor but smaller board)
 
 This board can be connected to:
+   * one current sensor providing an analog voltage depending on the current
+   * one or two temperature sensor(s) providing an analog voltage depending on the temperature. The sensor can be an IC like the TMP36 or a CTN (thermistor). In the last case (CTN) you have to enter the specification of the CTN in config.h and to compile yourself.
    * a pressure sensor (GY63 or GY86 board based on MS5611, SPL06 or BMP280) to get altitude and vertical speed
    * a MS4525D0_A or a SDP3X (x=1,2,3) or SDP8xx  or XGZP6897D differential pressure sensor to get airspeed (and compensated vertical speed)
-   * a MP6050 (acc+gyro e.g. GY86) to improve reaction time of the vario or to get pitch/roll
+   * a MP6050 (acc+gyro e.g. GY86) to improve reaction time of the vario, to get pitch/roll, to stabilize a camera and/or the model 
    * 1 or 2 ADS1115 if you want to measure more than 4 analog voltages
    * a GPS from UBlox (like the beitian bn220) or one that support CASIC messages   
        *  note : a Ublox GPS can be re-configured automatically by oXs ( with own oXs param). It has then to use the default standard ublox config.
@@ -78,9 +80,9 @@ This board can be connected to:
    * some voltage dividers (=2 resistors) when the voltages to measure exceed 3V  
       note : a voltage can be used to measure e.g. a current (Volt2) or a temperature (Volt3/4) when some external devices are used to generate an analog voltage
    * a RPM sensor
-   * an ESC from Hobbywing (using V4 telemetry protocol), from ZTW mantis, from Kontronik or from BlHeli. Those ESC provide one voltage, one current (+ current consumption) + RPM + 1 or 2 temperatures.
+   * an ESC from Hobbywing (using V4 telemetry protocol), ZTW mantis, Kontronik, Jeti or from BlHeli. Those ESC provide one voltage, one current (+ current consumption) + RPM + 1 or 2 temperatures.
    * another rp2040 with an SD card to log huge volume of data's
-   * a LORA module SX1276/RFM95 to transmit the localisation on a long range rf link (see locator section)   
+   * a LORA module with a Ebyte E220-900M22S (previous version - about 1.14.10 was with SX1276/RFM95) to transmit the localisation on a long range rf link (see locator section)   
 
 About the SDP31, SDP32, SDP33 , SDP810:
      Those sensors are probably better than MS4525. They do not requires calibration (and reset) and are more accurate at low speed.
@@ -125,7 +127,7 @@ Note: pins between () means that they are optional.
 
 Up to 16 PWM signals can be generated on pin gpio 0...15 (to select in setup parameters). 
 
-Voltages 1, 2, 3, 4 can be measured on gpio 26...29. Take care to use a voltage divider (2 resistances) in order to limit the voltage on those pins to 3V max. V2 is normally used to measure a current (based on the analog voltage). V3 and V4 can be used to measure or a voltage or a temperature (based on a voltage). For each voltage being measured, you probably have to specify the offset and scale to be applied.
+Voltages 1, 2, 3, 4 can be measured on gpio 26...29. Take care to use a voltage divider (2 resistances) in order to limit the voltage on those pins to 3V max. V2 is normally used to measure a current (based on the analog voltage). V3 and V4 can be used to measure or a voltage or a temperature (based on a voltage provided by a sensor like TMP36 or a CTN/thermistor). For each voltage being measured, you probably have to specify the offset and scale to be applied.
 
 One RPM (Hz) can be measured
 * Take care to limit the voltage to the range 0-3V; so if you use capacitor coupling, add diodes and resistor to limit the voltage
@@ -147,7 +149,7 @@ When a GPS is used:
 *  Connect the TX pin from GPS to the TX pin selected in parameter for RP2040
 *  So take care that wires TX and RX are not crossed (as usual in Serial connection)  
 
-When a Hobbywing, ZWT, Kontronik or BlHeli ESC is used:
+When a Hobbywing, ZWT, Kontronik, Jeti or BlHeli ESC is used:
  * Connect the serial pin from ESC to the pin selected in parameter for RP2040 (for ESC_PIN)
  * Connect GND from ESC to RP2040 GND
  * do not define gpio's in RP2040 parameters for V1, V2, RPM and let TEMP parameter on 0. You can use V3 and V4 if you want. Note: SCALE1, SCALE2, OFFSET2 and RPM_MULT have to be defined based on your ESC and your motor.
@@ -167,16 +169,18 @@ Note: pin 16 is reserved for an internal LED on RP2040-zero or RP2040-TINY and s
 |SBUS_OUT = 0/29           |Sbus output|  
 |TLM = 0/29                |telemetry data (! for futaba Sbus2, this pin must be equal to PRI pin - 1)|  
 |V1= 26/29 ... V4= 26/29 |voltage (or current/temperatue) measurements |  
-|SDA = 2, 6, 10, 14, 18, 22, 26 | I2C devices (baro, airspeed, MP6050, ADS115, ...)|  
-|SCL = 3, 7, 11, 15, 19, 23, 27 | I2C devices (baro, airspeed, MP6050, ADS115, ...)|
+
 |RPM = 0/29                     | RPM|
 |LED = 16                       | internal led of RP2040-zero or RP2040-TINY|  
 |LOG = 0/29                     | data to be logged |  
 |ESC_PIN = 0/29                 | data provided by ESC (rpm, volt, current, temp)|
-|SPI_CS  = 0/29                 | Chip Select pin from RMF95 (locator)|
-|SPI_SCK = 10, 14, 26           | SCK pin from RFM95 (locator)|
-|SPI_MOSI = 11, 15, 27          | MOSI pin from RFM95 (locator)|
-|SPI_MISO = 8, 12, 24, 28       | MISO pin from RFM95 (locator)| 
+|SPI_CS  = 0/29                 | Chip Select (=NSS) pin from E220-900M22S (locator)|
+|SPI_SCK = 10, 14, 26           | SCK pin from E220-900M22S  (locator)|
+|SPI_MOSI = 11, 15, 27          | MOSI pin from E220-900M22S  (locator)|
+|SPI_MISO = 8, 12, 24, 28       | MISO pin from E220-900M22S  (locator)| 
+|SPI_BUSY = 0/29                | Busy pin from E220-900M22S  (locator)|
+|HIGH = 0/29                    | set the voltage level to 3V; can be used as Vcc for some sensors|
+|LOW = 0/29                     | set the voltage level to 0V; can be used as Ground for some sensors|
 
 
 ## --------- Software -------------------
@@ -191,18 +195,23 @@ If you just want to use it, there is (in most cases) no need to install/use any 
 * copy and paste (or drag and drop) the oXs.uf2 file to this new drive
 * the file should be automatically picked up by the RP2040 bootloader and flashed
 * the RPI_RP2 drive should disapear from the PC and the PC shoud now have a new serial port (COMx on windows)
-* you can now use a serial terminal (like putty , the one from arduino IDE, ...) and set it up for 115200 baud 8N1. Set it up in order to let it send automatically CR/LF when you press ENTER.
+* you can now use a serial terminal (like putty , the one from arduino IDE, ...) and set it up for 115200 baud 8N1.
+* IMPORTANT NOTE: Set your USB/SERIAL terminal in order to let it send automatically CR/LF (carriage return+line feed) when you press ENTER.
 * while the RP2040 is connected to the pc with the USB cable, connect this serial terminal to the serial port from the RP2040
-* when the RP2040 start (or pressing the reset button), press Enter and it will display the current configuration.
+* when the RP2040 start (or pressing the reset button), press just Enter and it will display the current configuration.
 * to list all the commands, send ?.
 * if you want to change some parameters, fill in the command (code=value) and press the enter.
 * you can enter severals commands without repowering the device
+* to fill several command at once, use a ";" to separate several commands; press enter at the end. 
 * Important note : when you enter usb commands to change parameters, they are not automatically applied. Most of the time, oXs will stop most functionalities. You have to save the changes using the SAVE command and then make a power off/on.
+* with the DUMP command, you can get a list of most important parameters (not failsafe, mpu offsets nor sequencers) in a format that allows easy copy/paste/edit. This is an easy way to copy parameters from one oXs device to another one. 
 
 
 Developers can change the firmware, compile and flash it with VScode and Rapsberry SDK tools.  
 An easy way to install those tools is to follow the tutorials provided by Rapsberry.  
-In particular for Windows there is currently an installer. See : https://github.com/raspberrypi/pico-setup-windows/blob/master/docs/tutorial.md
+For Windows there was an installer. See : https://github.com/raspberrypi/pico-setup-windows/blob/master/docs/tutorial.md
+Still I think the best way currently would first to install Visual Studio Code (VS Code). There are many tuto on theweb.
+And then to install (inside VS Code) the extension named "Raspberry Pi Pico"
 
 Once the tools are installed, copy all files provided on github on you PC (keeping the same structure).  
 Open VScode and then select menu "File" + item "Open Folder". Select the folder where you copied the files.  
@@ -221,7 +230,7 @@ This speed (=baud rate) must be the same as the baudrate defined on the receiver
 Usually ELRS receiver uses a baudrate of 420000 to transmit the CRSF channels signal to the flight controller and to get the telemetry data.  
 Still, ELRS receivers can be configured to use another baud rate. In this case, change the baudrate in parameters accordingly.  
 
-You have to compile your self the firmware if you want to change some values in the config.h file in order e.g. to:
+You have to compile your self the firmware if you want to change some less usual values in the config.h file in order e.g. to:
 * change the setup of the ADS1115
 * allocate other slots for Sbus2 in Futaba protocol
 * allocate another physical ID for Sport in Sport/Fbus protocols
@@ -229,7 +238,7 @@ You have to compile your self the firmware if you want to change some values in 
 * assign another sequence number and/of generate alarms for some telemetry fields in Multiplex protocol
 * change the I2C address of some I2C sensors
 * use other default paramaters in order to avoid using commands via the USB/serial monitor. 
-* change the sensitivity of the XGZP sensor (if defferent from XGZP6897D001KPDPN)
+* change the sensitivity of the XGZP sensor (if different from XGZP6897D001KPDPN) (see #define XGZP_K_FACTOR in config.h)
 
 ## ------------ Failsafe---------------
 * For ELRS protocol, oXs does not received any RC channels data from the receiver(s) when RF connection is lost. If oXs is connected to 2 receivers (via PRI and SEC), oXs will generate PWM and Sbus signals on the last received data. If oXs does not get any data anymore from receiver(s), it will still continue to generate PWM and/or SBUS signals based on the failsafe setup stored inside oXs.
@@ -274,35 +283,200 @@ Then, depending on the value sent by the Tx on the selected channel, oXs manages
 
 Note: you can use the FV command to know the current coefficient. This allow you to check that your Tx sent a Rc channel value that match the expected goal and indeed required, adjust your Tx settings.
 
-## ---------------- calibration of MP6050  ---------------
+## ---------------- Calibration and orientation of MP6050  ---------------
 
-When an MP6050 is used, it is important to calibrate it and to let oXs knows his orientation in the plane. 
-The mpu must be installed in the model in such a way that one axis of MPU6050 is vertical and that another one is aligned with main axis of the model (nose-queue). There are 24 possible orientations to match this. Most commercial gyro's require that the user declare the orientation of the MP6050 in the model.
-oXs does it automatically with a 2 steps calibration process (named here Horizontal and Vertical).
+When MP6050 (=MPU) is used, oXs must know his orientation in the model. There are many possible orientations.
 
-* Horizontal calibration calculates the acceleration and gyro offsets in the 3 directions. It identifies also partly the orientation of the MP6050.
-It requires that the plane is set horizontally (like when it flies and roll/pitch are both 0) and do NOT move at all.
-Then a usb command MPUCAL=H is sent.
-The horizontal calibration takes a few seconds (less than 5). The result is displayed.
+Furthermore, for best result, each MP6050 must be calibrated (accelerometer and gyro). This is just optional when MP650 is used to improve vario reactivity (so not to know roll/pitch, stabilize camera and/or model). 
 
-* Vertical calibration completes the determination of MPU6050 orientation.
-It requires that the plane is set vertically with the nose up. It is not required to keep it totally still in this position.
-Then a command MPUCAL=V is sent. The horizontal calibration is done in less than 1 second.
+Best is to start with calibration of the accelerometer, then calibration of the gyro and finaly to set up the orientation of the MPU in the model.
 
-Please note that, like other usb commands that change the configuration, you have to send afterwards a SAVE command to store the results in memory and so keep them after a power off or a reset.
-
-The current configuration is displayed (like other parameters) with the ENTER command.
-
-Once the MP6050 calibration process has been done and saved, it is normally not required to do it again.
-Still if you change the orientation of oXs in a model, you have or to perform the 2 steps calibration again or you can just change the orientation using 2 usb commands GOV (horizontal orientation) and GOV (vertical orientation). Those 2 commands can change the orientation but not the offset.
+Note: Once the MP6050 calibration process has been done and saved, it is normally not required to do it again.
+Take care that, if you change the orientation of the M6050 in a model, you have to update the orientation parameters in oXs (not the calibration).
 
 
-Note: at each power on, oXs performs automatically a new calibration of the gyro offsets (so nor acceleration offsets nor orientation).
-To get correct offset parameters, the model must stay still during the first 2 seconds. His attitude does not matter. It is possible to disable this automatic calibration with a parameter in file config.h. 
+### 1 Calibration of the accelerometer
 
-Please note that when the MP6050 is used to stabilize the plane, you have also to perform a gyro mixer calibration. See gyro section.  
-   
+To calibrate the MP6050, oXs must be conected to the PC (via usb) and the PC must be running a serial montitor (to enter commands and display the oXs messages). It requires to make several measurements while the sensor remains fix in many different orientations.
 
+* The process starts entering a USB command MPUCAL=A.
+* Then the sensor is put in one orientation and while staying fix you press ENTER. oXs performs a measurement. It is is valid, oXs displays the accelerations X,Y,Z in this position. If the measurement is not valid, oXs displays a message saying that the measure was to noisy (then press ENTER again to take the mesures again in the same position).
+* When done in one position, change slightly the orientation of the sensor and press ENTER again to make a new mesurement.
+* Repeat the process in many different orientations (more than 20, less than 200).
+* When done, enter the command MPUCLA=E to end the process.
+* oXs specifies then the number of measurements, the scale being used and a list of all measurements.
+* Make a copy/paste of this list and save it in a txt file.
+* Run the program "magneto12.exe" that is present in the folder doc. In this program fill the box "Norm" with the scale and open the saved txt file that you created with the measurements. Click the button "Calibrate". This provides 12 parameters ( 3 values in "(b)" and 3 rows of 3 values in "(A)").
+* Enter those 12 parameters (space delimited) in oXs with one  command MPUACC=xx.xxxxx yy.yyyyy ....
+* Then enter SAVE command to save the parameters.
+
+In the doc folder, you can also find word document explaining again the process and a link to a video about accelerometer calibration. It shows the principle even if it is not done with an oXs device.
+
+
+### 2 Calibration of the gyro
+
+The gyro calibration is quite easy because it only requires that the sensor does not move at all.
+
+It is normally done automatically at each power on but it requires that the model stay still the first 2 sec. If oXs detects that the sensor moves during the first 2 sec, the process will fail and oXs will reuse parameters that have been saved.
+
+Note: It is possible to disable this automatic calibration with a parameter in file config.h. 
+
+So, it is not bad practice to save gyro calibration offsets. To do so, oXs must be conected to the PC (via usb) and the PC must be running a serial montitor (to enter commands and display the oXs messages).
+
+* Keep the model absolutely still (orientation does not matter) and enter a USB command MPUCAL=G
+* After a short time, oXs says if calibration is OK or if the measurement is not valid (to noisy, model is moving)
+* If measurement is not valid, reenter the command MPUCAL=G
+* Then enter SAVE command to save the parameters.
+
+### 3 Set up the gyro orientation.
+
+The mpu must be installed in the model in such a way that one axis of MPU6050 is vertical and that another axis is aligned with main axis of the model (nose-queue). There are 24 possible orientations to match this. Most commercial gyro's require that the user declares the orientation of the MP6050 in the model. oXs does it automatically.
+
+There are 2 ways to let oXs know the MPU orientation:
+* using USB commands (MPUORI=H and MPUORI+V); this is the easiest way to do it when the MP6050 is not used to stabilize the model (gyro function). The process is explained here below. 
+* using the gyro learning process with the handset; this process is used when the MP6050 is used to stabilize the model (gyro function) because it is combined with the learning of the servo mixers defined on the handset. It is done from the handset (even if messages can also be displayed on the PC via USB). It is explained in the gyro section (see learning process). 
+
+#### Process with USB command:
+* Set the plane horizontally (like when it flies and roll/pitch are both 0) and enter the usb command MPUORI=H. The result is displayed.
+* Set the plane vertically with the nose up and enter the usb command MPUORI=V. The result is displayed.
+* Then enter SAVE command to save the parameters.
+
+
+Notes:
+* The current configuration is displayed (like other parameters) with the ENTER command.
+* When the MP6050 is used to stabilize the plane (gyro function), you have also to perform the gyro learning process to let oXs know the  gyro mixer calibration. See gyro section.  
+
+## ------------------ Gyro ------------------
+
+Important note: at this stage, this is still experimental. It has not been intensively tested. So used it at you own risk.
+
+### Principle.
+- When oXs get the Rc channels and has a MPU6050 (accelerometer/gyro), oXs can automatically apply corrections on the PWM/sbus signals in order to stabilize the model on 3 axis
+- Gyro has 4 modes (off/Normal/Hold/stabilize); user selects the active mode (between 3) on the Tx with a 3 positions switch.
+- This switch must allow the handset to generate on a Rc channel a signal that is or negative (Normal mode), or null (gyro off) or positive (gyro in hold or stabilize mode depending on a oXs parameter).
+    - In "Normal" mode, the gyro tries to compensate for external perturbations (wind,...). The sticks allow to control the model.
+    - In "OFF" mode, oXs just transmit the channels provided by the handset without any gyro correction
+    - In "Hold" mode, oXS tries to keep the model in the current orientation when sticks are centered. Moving the sticks allows to change the orientation of the model.
+    - In "Stabilize" mode, oXs tries to keep the model horizontal when the sticks are centered. The sticks allow to control the model. 
+- Respectively the positive and the negative values from this channel allow also to select the general gain of the gyro (for each mode separately) 
+- oXs can apply Gyro corrections on as many servos as needed (e.g. for a wing with 4 aileron servos, on 2 elevator servos and/or 2 rudder servos, on Vtail stab,... )
+- On the opposite to many commercial gyros, the mixers and servos limits are defined only in the handset (just like when no gyro is used). oXs detect automatically the mixers and limits applied on the servos concerned by gyro corrections during a special setup phase (= gyro learning phase = mixer calibration).
+- To be able to apply corrections using the same mixers as the handset, oXs must also know the position of the 3 sticks aileron, elevator and rudder. This requires that the handset transmit those positions on top of all channels that control the servos. So this requires 3 more channels + 1 channel to select the gyro mode/gain than when no gyro is used.
+- several parameters (see below) have to be defined with Usb commands (no compilation/reflash required) to set up the oXs gyro. 
+
+### Setup on the handset.
+- first make your setup just like there would be no gyro (mixers, servo directions, limits, expo, differential, ...).
+- on top of your normal setup, add a channel controlled by a 2 or 3 positions switch that will let you select the gyro mode. When rc channel provides 0%, the gyro will be OFF. When the channel provides a negative value (between -100% and 0%), the gyro will be in "Normal" mode (=rate mode). When the channel provides a positive value (between 0% and 100%), the gyro will be in "Hold" or "Stabilize" mode depending on an oXs parameter. The gain of the gyro can (should) be different in each mode. So the negative value can (should) not be just the opposite of the positive. When the absolute value is 100%, the gyro gain is at max. Best is to use some global variables and/or slider if the handset allows it.
+- let the handset transmit 3 additional channels giving the stick positions (aileron, elevator and rudder). Range must be -100%/100%. Best is to avoid to include trim, expo, differential, ... so that those additional channels represent just the raw positions of the sticks.
+
+
+### Required oXs parameters to set up the gyro.
+oXs has to know: 
+- gpio's and channels used for servos (just like when no gyro is used) with commands like C2=4 (meaning channel 2 is generated on gpio 4)
+- the channel used to select the gyro mode and the general gyro gain. This is specified with the command GMG=xx (Gyro Mode Gain; xx = the rc channel between 1 and 16).  
+- the 3 additional channels providing "original" stick positions. Those channels are specified with the commands GSA (Gyro Stick Aileron), GSE(gyro Stick Elevator), GSR (gyro Stick Rudder)
+
+### Optional oXs parameters to fine tune the settings: to get the list of commands to use, enter the USB command ? (=help)
+- 3 gains (one per axis roll/pitch/yaw). This allows to fine tune the gain per axis. Note: the sign of the gain define the direction of the gyro corrections.
+- 1 parameter to select the stick range around center where corrections apply (full throw , 1/2 , 1/4)
+- 1 parameter max rotate rate in hold mode (very low, low, medium , high)
+- 1 parameter to enable (or not) max rotate rate in normal mode too.
+- 1 parameter to select if oXs must apply Hold mode or Stabilize mode.
+- PID parameters (Kp,Ki,Kd) per axis and per mode (Normal/Hold/stabilize). This allows a fine tuning of the gyro. The values depends on the model.
+
+Note: as usual with oXs:
+- the list of all usb commands and the allowed values can be displayed entering "?" command.
+- the current setting is displayed just entering ENTER
+- do not forget to enter SAVE command to keep you changes after a power off. After a SAVE command you must, most of the time, make a shutdown/reset to really activate the changes.
+
+
+### Gyro learning process = mixer calibration = discovering the orientation/mixers and limits
+
+The general principle is to let the mixers + servo centers/min/max being defined only on the handset.
+Still oXs must take care of those mixers and limits when it applies gyro corrections.
+To achieve this, oXs has to capture the positions of all Rc channels when sticks are in several specific positions. That is the reason why you had to add 3 channels on the handset (see above).
+
+The process to let oXs discover the mixers/limits to apply is named the "gyro learning" process (also named "mixer calibration"). It is mandatory. This process is not the same as the calibration of the MP6050.
+
+This process also let oXs find automatically the orientation of the MP6050 in the model. That is the reason why you don't need to use usb commands (MPUORI=..) to setup the orirentation of the MP6050 when gyro is used.
+
+Important note: the learning process must be done again if the orientation of the MPU in the model change and/or if the mixers/servo directions change on the handset.
+
+The learning process consist of several steps.
+
+#### 1 Starting the process
+
+To start the mixer calibration, the user has to put the model HORIZONTAL and, on the handset, simultaneously:
+- put AIL and RUD sticks FULL to the right
+- put ELV stick FULL in the direction that makes the model go up (so normally the stick full down)
+- move the switch used to control the gyro mode more than 4 X within 5 sec.
+
+When oXs detect this situation, It will try to find the MP6050 axis that measures gravity.
+If oXs can't, it stops moving the servos and sending telemetry. The user has to make a power off. So it is clear that the process did not ended properly.
+
+If "horizontal" orientation is found, oXs will set the led on RED and register the "horizontal" orientation and the 3 stick positions.
+It then goes to the next step (discovering the mixers)
+
+#### 2 First Phase : discovering the mixers.
+
+oXs will then analyse the positions of sticks expecting to detect 7 cases:
+- 1: AIL, RUD and ELV sticks simultaneously centered.
+- 2/7: one of the 3 sticks (AIL,ELV,RUD) is full in a direction while the 2 others are centered. This should be done in all 6 possible cases (AIL in RIGHT corner, AIL in LEFT corner, RUD in RIGHT corner, RUD in LEFT corner, ELV in UP corner , ELV in DOWN corner).
+
+Each time a case is detected, oXs will register the positions of all Rc channels.
+This wil help to apply the gyro corrections with the right proportions on the rigth servos.
+
+During this phase, to avoid side effect on the discovered mixers, it is VERY IMPORTANT that :
+* Throttle does not change (so best use the safety switch to lock the transmitted RC channel to e.g. -100%)
+* switches, sliders do not change.
+
+The 7 cases can be done in any order and any number of times.
+
+When all cases have been detected at least once, LED will become BLUE (saying that it allowed to switch to next step).
+
+The user can still continue to move the sticks as previous as long as he want.
+
+#### 3 Switching to phase 2:
+
+When all cases have been detected (led is blue),next step must be activated.
+
+To do so, SET THE MODEL VERTICAL with the NOSE UP and then change (1X is enough) the position of the gyro switch.
+
+Note: switch changes during the first 5 sec of phase 1 are just discarded (so it does not matter if user changed more than 5 X the switch when it was starting the process).
+
+oXs tries to detect the new orientation (vertical nose up) and checks that it is different from the "Horizontal".
+
+In case of error (wrong orientation or at least one of the 7 cases not detected -LED still RED), oXs stops moving the servos and sending telemetry. The user has to make a power off. So it is clear that the process did not ended properly.
+
+If gyro switch is valid, LED becomes GREEN (= second phase (discovering the limits) is running).
+
+#### 4 Second phase: dicovering the limits
+
+User can now move all sticks, sliders, switches(except gyro switch) simultaneously in all positions in order to let each servo reaches his min and max allowed positions.
+
+oXs registers those limits. They will be used to limit the movements when oXs applies gyro corrections on top of the Rc channel received from the handset.
+User can make this step as long he want (but must be at least 2sec).
+During this phase, orientation of the model does not matter (it can be set e.g. horizontally in order to easily move the stick).
+
+#### Ending the learning process
+
+To close the mixer calibration process, user has to change once more the gyro switch.
+
+oXs saves then all parameters in flash so the calibration does not have to be repeated (except if mixers/mechanical limits are modified on the handset).
+
+Note: switch changes during the first 2 sec of phase 2 are just discarded (so it does not matter if user changed to often the switch when it was switching to phase 2).
+
+### Notes:
+At each power on, oXs uploads saved parameters and uses them.
+
+Outside of the learning process process, end points of each servo (=min/max limits) are automatically updated based on the Rc channel values received from the receiver (so before gyro corrections).
+This allows oXs to apply gyro corrections that exceed the limits registered during the cabration but without exceeding the limits defined in the handset.
+The drawback of skipping step 2 of learning process is that some gyro corrections could be more restricted than really required in the first minutes after a power on.
+
+### Checks.
+
+when the learning process has been done, it is important to check that every thing is OK.
+So without moving the model, first check that the servos move as expected.
 
 ## ---------------- Sequencers ---------------
 With oXs, one single channel on the handset can control one or several SERVOS in sequences defined by the user (e.g. for landing gears with doors and wheels).
@@ -404,67 +578,67 @@ This format allows to compress the data transmitted via the (quite slow) UART to
 \
 The logger will remove the stuff bytes, uncompress the data, combine the new data with previous one to create an "actual" set of data's, convert it in CSV format and finally store it on a SD card. 
 
-## ------------------ Gyro ------------------
-When oXs get the Rc channels from a receiver (via Sbus, Ibus, ...) and when a MPU6050 is installed, oXs can apply gyro corrections on several servos.
-For more details, please read carrefully the file "gyro concepts.md" in the folder "doc".
-
-
-Important note: at this stage, this is still experimental. It has not been intensively tested. So used it at you own risk.
-
-
 ## ------------------ Model Locator ----------------------------------------
-oXs can be used to locate a lost model (if you add a LORA module).
+oXs can be used to locate a lost model if you add a LORA module Ebyte E220-900M22S (or a RFM95 - depreciated).
  
 The model is normally connected to the handset but when the model is on the ground, the range is quite limitted. 
 So if a model is lost at more than a few hundreed meters, the handset will not get any telemetry data anymore. 
 oXs allows to use a separate connection (with LORA modules) in order to have an extended range and have a chance to find back a lost model.
 This is possible because those modules use a lower frequency, a lower transmitting speed and a special protocol for long range.
-The LORA modules are SX1276/RFM95 that are sall and easily available (e.g. Aliexpress, ebay, amazon)
+The LORA modules are E220-900M22S that are small, cheap and easily available (e.g. Aliexpress, ebay, amazon)
 \
 \
 The principle is the following:
 * You have to build 2 devices: 
-    * an oXs device with the sensors you want (ideally a GPS and optionally e.g. vario, voltages, current, ...) and a SX1276/RFM95 module
+    * an oXs device with the sensors you want (ideally a GPS and optionally e.g. vario, voltages, current, ...) and a E220-900M22S module
     * a "locator receiver" device with:
-        * an Arduino pro_mini running at 8 mHz 3.3V
-        * a second SX1276/RFM95 module
-        * a display 0.96 pouces OLED 128X64 I2C SSD1306. It is small and is available for about 2€.;
+        * a Wemos D1 mini (or clone) board
+        * a second E220-900M22S module
+        * optionally a display 0.96 pouces OLED 128X64 I2C SSD1306. It is small and is available for about 2€.
+        * optionally a push button to activate the Wifi 
 
 * Normally:
     * the locator receiver is not in use.
-    * oXs is installed in the model and transmits the sensor data's over the normal RC Rx/Tx link. The SX1276 module in oXs is in listening mode (it does not tranmit) 
+    * oXs is installed in the model and transmits the sensor data's over the normal RC Rx/Tx link. The E220-900M22S module in oXs is in listening mode (it does not tranmit) 
 * When a model is lost:
     * the locator receiver" is powered on. It starts sending requests to oXs.    
-    * When the SX1276/RFM95 module in oXs receives a request, it replies with a small message containing the GPS coordinates and some data over the quality of the request signal.
-    * the display on the locator receiver shows those data's as wel as the quality of the signal received and the time enlapsed since the last received message.
+    * When the E220-900M22S module in oXs receives a request, it replies with a small message containing the GPS coordinates and some data over the quality of the request signal.
+    * the display on the locator receiver shows those data's (longitude/latitude) as wel as the quality of the signal received and the time enlapsed since the last received message.
+    * the same informations can be displayed on a GSM when the wifi is activated (button has been pushed). This requires connect the GSM to the Locator Wifi, to open a web browser (e.g. Chrome) and to enter an IP address. More details are given in the oXs locator receiver project.
 
 
-Note: the range of communication between two SX1276 modules is normally several time bigger then the common RC 2.4G link.   
+Note: the range of communication between two Ebyte modules is normally several time bigger then the common RC 2.4G link.   
 If oXs and locator receiver are both on the ground, it can be that there are to far away to communicate with each other.
 But there are 2 ways to extend the range:
 * use a directional antena on the locator receiver. The advantage of this solution is that, if you get a communication, you can use the system as a goniometer (looking at the quality of the signal) to know the direction of the lost model. This even works if you have no GPS connected to oXs. The drawback is that a directional antenna is not as small as a simple wire.
-* put the locator receiver (which is still a small device) on another model and fly over expected lost aera. In this case, the range can be more than 10 km and the chance is very high that a communication can be achieved between the 2 modules. Even if the communication is broken when the model used for searching goes back on the ground, you will know the location of the lost model because the display will still display the last received GPS coordinates.
+* put the locator receiver (which is still a small device) on another model and fly over expected lost aera. In this case, the range can be more than 5 km and the chance is very high that a communication can be achieved between the 2 modules. Even if the communication is broken when the model used for searching goes back on the ground, you will know the location of the lost model because the display will still display the last received GPS coordinates.
 
 
 
 
-An oXs device with a SX1276/RFM95 does not perturb the 2.4G link and consumes only a few milliAmp because it remains normally in listening mode and when sending it is just a few % of the time. So, in order to increase the reliability of the system, it is possible to power oXs with a separate 1S lipo battery of e.g. 200/500 mAh. This should allow the system to work for several hours.
+An oXs device with an Ebyte does not perturb the 2.4G link (it uses another frequency range - default 868mHz) and consumes only a few milliAmp because it remains normally in listening mode and when sending it is just a few % of the time. So, in order to increase the reliability of the system, it is possible to power oXs with a separate 1S lipo battery of e.g. 200/500 mAh. This should allow the system to work for several hours.
 
 
-Cabling : The SX1276/RFM95 module must be connected to the Rp2040 in the following way
+Cabling : The Ebyte module must be connected to the Rp2040 in the following way
 * rp2040 SPI_CS    <=> NSS from module
 * rp2040 SPI_MOSI  <=> MOSI from module
 * rp2040 SPI_MISO  <=> MISO from module
 * rp2040 SPI_SCK   <=> SCK from module
 * rp2040 GRND      <=> GRND from module
+* rp2040 SPI_BUSY  <=> Busy from module
 * external (or rp2040 ) 3.3V   <=> 3.3V from module (!!! module does not support 5 Volt).
+* Futhermore, the pins "TX" and "DI02" of the module must be connected toegether.
+
+Do not forget to install an antenna on the E220 module (or solder a wire of about 8.5 cm on the pin named ANT)
 
 
-To be checked : perhaps you have to use an additional voltage regulator (cost less than 1€) to get the 3.3 V, because it is not sure that the rp2040 voltage regulator can provide enough current when module is transmitting (for just a small time)  
+To build the locator receiver, please check this link https://github.com/mstrens/oXs_locator_receiver_on_ESP8266 
 
 
-To build the locator receiver, please check and use the project openXsensor for Arduino (on github) 
+Note: oXs (=transmitter) stay in sleep mode most of the time. Once every X (see config.h) sec, it starts listening to the receiver for e.g. 5 sec. If the receiver is not powered on, oXs never get a request and so never sent data.
+When powered on, the receiver sent a request every 1 sec. At least X sec later (when entering listening mode), oXs should get this request and then reply immediately. oXs will then reply to each new request (so every 1 sec). oXs goes back to sleep mode for X sec if it does not get a request within 60 sec.
 
+Note: this version of oXs is foreseen to work with E220-900M22S modules and with the version of locator receiver from main branch of oXs_loacator_on_ESP8266. Still it is possible to use depreciated RFM95 module (less performant, more expensive) but it requires to edit the config.h file to activate the option "#define USE_RFM95". In this case, you have to use the locator receiver from oXs_locator_on_RP2040 (uses a rp2040 and an oled display) or from the rfm95 branch from oXs_locator_receiver_on_ESP8266 (uses a ESP8266 and wifi to communicate with a GSM or PC).When a RFM95 is used, SPI_BUSY pin must be defined but is not cnnected to the RFM95.
 
 ## ------------------ Led -------------------
 When a RP2040-Zero or RP2040-TINY is used, the firmware will handle a RGB led (internally connected to gpio16).

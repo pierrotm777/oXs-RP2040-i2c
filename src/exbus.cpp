@@ -109,8 +109,8 @@ extern uint32_t lastRcChannels ;
 extern uint32_t lastPriChannelsMillis ;
 extern uint32_t lastSecChannelsMillis; 
 extern sbusFrame_s sbusFrame; // full frame including header and End bytes; To generate PWM , we use only the RcChannels part.
-extern sbusFrame_s sbus2Frame; // full frame including header and End bytes; To generate PWM , we use only the RcChannels part.
-extern bool newRcChannelsReceivedForPWM;  // used to update the PWM data
+//extern sbusFrame_s sbus2Frame; // full frame including header and End bytes; To generate PWM , we use only the RcChannels part.
+extern bool newRcChannelsFrameReceived;  // used to update the PWM data
 
 
 uint8_t exbusFieldList[NUMBER_MAX_IDX+1]; // keep the list of fields to be transmitted
@@ -156,7 +156,7 @@ JETISENSOR_CONST sensorsParam[] =  // value in this table are in the same order 
     { 19     , "Pitch"       , "\xB0"      , EXBUS_TYPE_14 ,        1 , 3},  //PITCH,       // 20 imu        in 0.1 degree 
     { 20     , "Roll"        , "\xB0"      , EXBUS_TYPE_14 ,        1 , 3},  //ROLL,       // 20 imu        in 0.1 degree 
     { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //{ 21         , "Yaw"        , "\xB0"      , EXBUS_TYPE_14 ,        0 },  //YAW,       // 20 imu        in degree 
-    { 22     , "Rpm"         , "t/min"     , EXBUS_TYPE_22 ,        0 , 4},  //RPM ,        // RPM sensor    in Herzt
+    { 22     , "Rpm"         , "t/min"     , EXBUS_TYPE_22 ,        0 , 4},  //RPM ,        // RPM sensor    in rpm
     { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  ADS_1_1,      // Voltage provided by ads1115 nr 1 on pin 1
  
     { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  ADS_1_2,      // Voltage provided by ads1115 nr 1 on pin 2    25
@@ -165,7 +165,7 @@ JETISENSOR_CONST sensorsParam[] =  // value in this table are in the same order 
     { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  ADS_2_1,      // Voltage provided by ads1115 nr 2 on pin 1
     { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  ADS_2_2,      // Voltage provided by ads1115 nr 2 on pin 2
       
-    { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  ADS_2_3,      // Voltage provided by ads1115 nr 2 on pin 3    30
+    { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  30 // ADS_2_3,      // Voltage provided by ads1115 nr 2 on pin 3    30
     { 0xFF   , " "           , " "         , EXBUS_TYPE_NONE,       0 , 0},  //  ADS_2_4,      // Voltage provided by ads1115 nr 2 on pin 4
     { 23     , "Airspeed"    , "Km/h"      , EXBUS_TYPE_14 ,        0 , 3},  //AIRSPEED,
     { 24     , "Comp Vspeed" , "m/s"       , EXBUS_TYPE_14 ,        2 , 3},  //AIRSPEED_COMPENSATED_VSPEED,
@@ -189,6 +189,7 @@ JETISENSOR_CONST sensorsParam[] =  // value in this table are in the same order 
 void setupExbusList(bool activateAllFields){
     exbusFieldList[0] = NUMBER_MAX_IDX;  // index of the name "oXs" = last in the list
     exbusMaxFields = 1;
+    
     if (( config.pinGpsTx != 255 ) ||  activateAllFields) {
         #if defined(P_LATITUDE) && (P_LATITUDE > 0)
             exbusMaxPooling[LATITUDE] = P_LATITUDE; 
@@ -219,6 +220,10 @@ void setupExbusList(bool activateAllFields){
             exbusFieldList[exbusMaxFields++] = GPS_CUMUL_DIST ;
         #endif     
     }
+    #define DEBUG_GPS_EXBUS
+    #ifdef DEBUG_GPS_EXBUS //do not activate other fields than GPS for this test
+        activateAllFields = false;
+    #endif    
     if (( config.pinVolt[0] != 255)  ||  activateAllFields || config.pinEsc != 255){
         #if defined(P_MVOLT) && (P_MVOLT > 0)
             exbusMaxPooling[MVOLT] = P_MVOLT;
@@ -311,7 +316,7 @@ void setupExbusList(bool activateAllFields){
     }
     if ( exbusMaxBandwidth == 0) exbusMaxBandwidth=1.0;
     // adapt the min and max
-    //#define EXBUS_PRINT_MAX_MIN
+    #define EXBUS_PRINT_MAX_MIN
     #ifdef EXBUS_PRINT_MAX_MIN
     printf("Priority list: factor = %f\n", exbusMaxBandwidth );
     #endif
@@ -332,7 +337,7 @@ void setupExbusList(bool activateAllFields){
     for (uint8_t i = 0; i<24; i++) {
         exbusRcChannels[i] = temp; 
     }
-    //#define EXBUS_PRINT_FIELDLIST
+    #define EXBUS_PRINT_FIELDLIST
     #ifdef EXBUS_PRINT_FIELDLIST
     printf("exbusFieldList ");
     for (uint8_t i = 0; i< exbusMaxFields ; i++){
@@ -395,7 +400,8 @@ void exbusPioRxHandlerIrq(){    // when a byte is received on the exbus, read th
 
 void handleExbusRxTx(void){   // main loop : restore receiving mode , wait for tlm request, prepare frame, start pio and dma to transmit it
     //static uint8_t previous = 0;
-    //#define SIMULATE_RX_EXBUS
+    #define SIMULATE_RX_EXBUS
+
     #ifdef SIMULATE_RX_EXBUS
     static uint8_t exbusRcChannelsSimulation[] = {
         0x3E, 0x03, 0x28, 0x06, 0x31, 0x20, 0x82, 0x1F, 0x82, 0x1F, 0x82, 0x1F, 0x82, 0x1F, 0x82, 0x1F, 0x82, 0x1F, 0x82, 0x1F,
@@ -411,7 +417,7 @@ void handleExbusRxTx(void){   // main loop : restore receiving mode , wait for t
 	//printf("CRC=%x\n",crcCalc);
 
     static uint32_t exbusLastSimulationMs = 0;
-    if ( (millisRp() - exbusLastSimulationMs) > 999 ) { // send a message once every 10 ms
+    if ( (millisRp() - exbusLastSimulationMs) > 9 ) { // send a message once every 10 ms
         //printf("simulation fill queue\n");
         exbusLastSimulationMs = millisRp();
         uint16_t c = exbusRcChannelsSimulation[0] | 0X8000;
@@ -450,6 +456,7 @@ void handleExbusRxTx(void){   // main loop : restore receiving mode , wait for t
             // so reset the buffer and process the byte
             if (data & 0X8000) {
                 exbusRxBufferIdx = 0; 
+                exbusRxBufferLen = 3;    
                 exbusIsBuffering = true; 
             } 
             if (exbusIsBuffering) {
@@ -593,7 +600,8 @@ void exbusDecodeRcChannels(){             // channels values are coded on 2 byte
     memcpy( (uint8_t *) &sbusFrame.rcChannelsData, &sbus[0], 23) ; // copy the data to the Sbus buffer
     lastRcChannels = millisRp();
     lastPriChannelsMillis =  lastRcChannels;
-    newRcChannelsReceivedForPWM = true;  // used to update the PWM data
+    newRcChannelsFrameReceived = true;  // used to update the PWM data
+    
 } 
  
 /*
@@ -625,7 +633,7 @@ void exbusCreateSendTelemetry(){ // search for the next data to be sent
     }
     
     waitUs(100); // wait a little before replying to a pooling
-    exbusCreateTelemetry();  // create the frame in exbusTxBuffer[]
+    exbusCreateTelemetry();  // create the frame in exbusTxBuffer[], return true when a frame is created
     //#define PRINT_EXBUS_TLM_FRAME
     #ifdef PRINT_EXBUS_TLM_FRAME
         printf("Frame=");
@@ -713,7 +721,7 @@ uint8_t addOneValue(  uint8_t idx , uint8_t nextBufferWrite){
             value = fields[idx].value   * 36 / 1000 ; // from cm/s to km/h
             break ;
         case RPM :
-            value = fields[idx].value   * 60 ; // from Hz to RPM
+            value = fields[idx].value   ; // in RPM
             break ;
         case PITCH :
             value = fields[idx].value   / 10 ; // from 0.01 degree to 0.1 degree
@@ -795,8 +803,8 @@ uint8_t exbusFindNextFieldIdx(){
 void exbusCreateTelemetry() {	
 	static uint8_t dictIdx = 0; // index used to retrieve the TXT in exbusFieldList[]; start at 0 
     //static uint8_t dataIdx = 1;  // index used to retrieve the parameter for data in exbusFieldList[]; start at 1
-    static uint16_t frameCnt = 0;
-    static uint32_t textFrameMask = 0X01;
+    static uint16_t frameCnt = 0;  // count the number of frames being sent
+    static uint32_t textFrameMask = 0X01; // At the begin, sent names once every 2 frames; afterwards only once every 32 frames
     uint8_t sensorsParamIdx;  // index to read sensorParam[]
     uint8_t totalDataLen = 0;
     uint8_t nextBufferWrite; // position where to write the next byte
@@ -843,8 +851,11 @@ void exbusCreateTelemetry() {
             countWrittenTotal += countWritten ;
             nextBufferWrite += countWritten ; // point to the next position
             //lastDataIdx = dataIdx;
-            fields[sensorsParamIdx].available = false; // mark field as transmitted
-            exbusLastPoolingNr[currentFieldIdx] = exbusPoolingNr; // store the polong nr when it field was sent last time 
+            //fields[sensorsParamIdx].available = false; // mark field as transmitted
+            fields[currentFieldIdx].available = false; // mark field as transmitted
+            //printf("Field_Idx to send= %i  prevNr= %i poolingNr= %i max= %i at %i\n",\
+            //    currentFieldIdx, exbusLastPoolingNr[currentFieldIdx]  ,exbusPoolingNr, exbusMaxPooling[currentFieldIdx], millisRp()) ;
+            exbusLastPoolingNr[currentFieldIdx] = exbusPoolingNr; // store the pooling nr when its field was sent last time 
             exbusPoolingNr++; // increase the polling nr 
             noFieldAdded = false;
         }

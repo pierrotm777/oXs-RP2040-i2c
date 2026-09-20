@@ -2,6 +2,7 @@
 #include "stdio.h"
 #include "config.h"
 #include "hardware/i2c.h"
+#include "hardware/clocks.h"
 #include "MS5611.h"
 #include "SPL06.h"
 #include "BMP280.h"
@@ -33,7 +34,7 @@
 #include "sequencer.h"
 #include "rlink.h"// add PM
 #include "xbus.h"// add PM
-#include "hitec.h"// add PM				   
+#include "hitec.h"// add PM	
 //#include "param.h"
 
 #include "ws2812.h"
@@ -48,7 +49,10 @@
 #include "logger.h"
 #include "esc.h"
 #include "gyro.h"
-#include "lora.h"
+#include "rfm95.h"
+#include "sx126x_driver.h"
+#include "kx134.h"
+#include "frsky_hub.h"
 
 // to do : add rpm, temp telemetry fields to jeti protocol
 //         try to detect MS5611 and other I2C testing the different I2C addresses
@@ -61,10 +65,13 @@
 //         test logger param in config parameters
 //         test tlm data in log interface
 //         it seems that in ELRS protocol, PWM are not generated since some version.
-//         use Rc channels with gyro correction to the signal Sbus out.
+//         use Rc channels with gyro correction to the signal Sbus out. 
 //         in mpu, when we apply offsets for acc and gyro, we should check that we do not exceed the 16 bits (or put the values in 32 bits)
 
-//         Test Lora locator functionality that has been added.
+//         manage the failsafe flag in Sbus out for protocols
+//         add AOA telemetry field when GPS, baro and gyro are installed.
+
+//         explain the learning process (for orientation).
 
 // Look at file in folder "doc" for more details
 //
@@ -95,8 +102,27 @@
 // VOLT1= 26/29 ... VOLT4 = 26/29
 // SDA = 2, 6, 10, 14, 18, 22, 26  (I2C1)
 // SCL = 3, 7, 11, 15, 19, 23, 27  (I2C1)
+// SPI_MOSI=
+// SPI_MISO=
+// SPI_SLCK= 
+// SPI_CS= 
 // RPM = 0/29 
 // LED = 16
+
+// General principle:
+// We use the 2 cores: core0 manages in/out signals with receivers, PWM and USB commands, core1 manages all sensors
+// In main loop (core0) we:
+// - get the value from the sensors (via a queue)
+// - send the telemetry data (taking care of the protocol)
+// - get the rchannels (in sbusFrame) according to the protocol
+// - decide if oXs rc failsafe values must be applied (when no rcchannels are recived within some delay)
+// - copy sbusFrame to sbusFrameCorr (if sbusFrame changed)
+// - apply gyro corrections on sbusFrameCorr
+// - generate sbus out and PWM signal based on sbusFrameCorr
+// - manage sequencer
+// - manage logger
+// - manage the button and led
+
 
 
 
@@ -104,9 +130,9 @@ VOLTAGE voltage ;    // class to handle voltages
 
 int32_t i2cError = 0;
 
-MS5611 baro1( (uint8_t) 0x77  );    // class to handle MS5611; adress = 0x77 or 0x76
-SPL06 baro2( (uint8_t) 0x76  );    // class to handle SPL06; adress = 0x77 or 0x76
-BMP280 baro3( (uint8_t) 0x76) ;    // class to handle BMP280; adress = 0x77 or 0x76
+MS5611 baro1;    // class to handle MS5611; adress = 0x77 or 0x76
+SPL06 baro2;    // class to handle SPL06; adress = 0x77 or 0x76
+BMP280 baro3 ;    // class to handle BMP280; adress = 0x77 or 0x76
 
 ADS1115 adc1( I2C_ADS_Add1 , 0) ;     // class to handle first ads1115 (adr pin connected to grnd)
 ADS1115 adc2( I2C_ADS_Add2 , 1) ;     // class to handle second ads1115 (adr pin connected to vdd)
@@ -122,6 +148,9 @@ GPS gps;
 
 // objet to manage the mpu6050
 MPU mpu(1);
+#ifdef KX134_IS_USED
+KX134 kx134(1);
+#endif
 
 LOGGER logger;
 
@@ -138,8 +167,10 @@ uint16_t toPwmMax = TO_PWM_MAX;
 EMFButton btn (3, 0); // button object will be associated to the boot button of rp2040; requires a special function to get the state (see tool.cpp)
                        // parameters are not used with RP2040 boot button 
 extern uint32_t lastRcChannels;
+extern bool rcChannelsUsChanged ; // says that rcChannelUs changed or not (to avoid some updates) (reset at each main loop)       
+extern bool rcChannelsUsCorrChanged ; // says that rcChannelUsCorr changed or not (to avoid some updates) (reset at each main loop)       
+extern bool newRcChannelsFrameReceived ;  // used to update the PWM data
 extern bool newRcChannelsReceivedForLogger;  // used to know when we have to update the logger data
-
 
 extern CONFIG config;
 bool configIsValid = true;
@@ -155,9 +186,11 @@ uint32_t lastBlinkMillis;
 extern SEQUENCER seq;
 extern struct gyroMixer_t gyroMixer ; // contains the parameters provided by the learning process for each of the 16 Rc channel
 extern bool gyroIsInstalled ;
+
 queue_t qSensorData;       // send one sensor data to core0; when type=0XFF, it means a command then data= the command (e.g.0XFFFFFFFF = save config)
 queue_t qSendCmdToCore1;
 volatile bool core1SetupDone = false;
+volatile bool core1OrientationMPUDone = false; // flag filled during the gyro learning process to say that orientation is done
 void core1_main(); // prototype of core 1 main function
 
 uint8_t forcedFields = 0; // use to debug a protocol; force the values when = 'P' (positive) or 'N' (negative)
@@ -235,9 +268,13 @@ void setupSensors(){     // this runs on core1!!!!!!!!
       //printf("adc1 done\n");
       adc2.begin() ;
       //printf("adc2 done\n");
-      mpu.begin(); 
+      #ifndef KX134_IS_USED
+      mpu.begin();
+      #else
+      kx134.begin(); 
+      #endif
       //printf("mpu done\n");
-      //blinkRgb(0,10,0,500,1000000); blink red, green, blue at 500 msec for 1000 0000 X
+    //blinkRgb(0,10,0,500,1000000); blink red, green, blue at 500 msec for 1000 0000 X
       gps.setupGps();  //use a Pio and 1 sm (in fact reuse the same sm for RX after TX)
       //printf("gps done\n");
       ms4525.begin();
@@ -253,7 +290,7 @@ void setupSensors(){     // this runs on core1!!!!!!!!
       setupRpm(); // this function perform the setup of pio Rpm
       //printf("rpm done\n");
       
-    setupEsc() ; 
+      setupEsc() ; 
 
       core1SetupDone = true;
       //printf("end core1 setup\n") ;    
@@ -277,7 +314,10 @@ void getSensors(void){      // this runs on core1 !!!!!!!!!!!!
   }
   adc1.readSensor(); 
   adc2.readSensor();
-  mpu.getAccZWorld();  
+  mpu.getAccZWorld();
+  #ifdef KX134_IS_USED
+  kx134.getAcc();
+  #endif  
   gps.readGps();
   if (ms4525.airspeedInstalled){
     ms4525.getDifPressure();
@@ -294,13 +334,17 @@ void getSensors(void){      // this runs on core1 !!!!!!!!!!!!
     calculateAirspeed( );
     vario1.calculateVspeedDte();
   }
-  
-
   readRpm();
   handleEsc();
   #ifdef USE_DS18B20
   ds18b20Read(); 
   #endif
+  //calculate AoA based on Vspeed, 2d ground speed and pitch
+  
+  if (fields[VSPEED].onceAvailable && fields[GROUNDSPEED].onceAvailable && fields[PITCH].onceAvailable){
+    float aoa = (float) fields[PITCH].value -  atan2f((float) fields[VSPEED].value, (float) fields[GROUNDSPEED].value) * 180.0 / 3.1416; 
+    sent2Core0( RESERVE5 , (int32_t) aoa) ;
+  }
 }
 
 //void mergeSeveralSensors(void){
@@ -403,6 +447,17 @@ void setup() {
   setupLed();
   setRgbColorOn(0,0,10);  // switch to blue during the setup of different sensors/pio/uart
   if (configIsValid) { // continue with setup only if config is valid 
+        // force level High / Low on some pins if requested in the config
+        if (config.pinHigh < 30){
+            gpio_init(config.pinHigh);
+            gpio_set_dir(config.pinHigh, GPIO_OUT);
+            gpio_put(config.pinHigh, 1);
+        }
+        if (config.pinLow < 30){
+            gpio_init(config.pinLow);
+            gpio_set_dir(config.pinLow, GPIO_OUT);
+            gpio_put(config.pinLow, 0);
+        }
       for (uint8_t i = 0 ;  i< NUMBER_MAX_IDX ; i++){ // initialise the list of fields being used 
         fields[i].value= 0;
         fields[i].available= false;
@@ -430,6 +485,10 @@ void setup() {
         setupSbusIn();
         setupSbus2In();
         setupSport();
+      } else if (config.protocol == 'B') { // Frsky Hub
+        setupSbusIn();
+        setupSbus2In();
+        setupFrskyHub();
       } else if (config.protocol == 'J') {   //jeti non exbus
         setupSbusIn();
         setupSbus2In();
@@ -465,6 +524,7 @@ void setup() {
       /* Add I2C Protocols */
       } else if (config.protocol == 'R') {   // Radiolink
         setupRlink();
+        //printf("RadioLink : setup I2C desactive pour test\n");
       } else if (config.protocol == 'X') {   // Spektrum Xbus
         setupXbusSpektrum();
       } else if (config.protocol == 'T') {   // Hitec
@@ -484,7 +544,8 @@ void setup() {
       
       watchdog_enable(3500, 0); // require an update once every 500 msec
   } 
-  printConfigAndSequencers(); 
+// todo - should be uncommented  
+  //printConfigAndSequencers(); 
   setRgbColorOn(10,0,0); // set color on red (= no signal)
   // to detect end of setup
   //printf("end of set up\n");
@@ -587,64 +648,70 @@ void loop() {
       //mergeSeveralSensors();
       watchdog_update();
       if ( config.protocol == 'C'){   //elrs/crsf
-        fillCRSFFrame();
+        fillCRSFFrame();  // send telemetry
         handleCrsfIn();
         handleCrsf2In();
-        fillSbusFrame();
       } else if (config.protocol == 'S') {  // sport
-        handleSportRxTx();
+        handleSportRxTx();   // send telemetry
         handleSbusIn();
         handleSbus2In();
-        fillSbusFrame();
+      } else if (config.protocol == 'B') {  // frsky Hub
+        handleFrskyHubFrames();   // send telemetry
+        handleSbusIn();
+        handleSbus2In();
       } else if (config.protocol == 'J') {  //jeti
-        handleJetiTx();
+        handleJetiTx();      // send telemetry
         handleSbusIn();
         handleSbus2In();
-        fillSbusFrame();
       } else if (config.protocol == 'H') {  //Hott
-        handleHottRxTx();
+        handleHottRxTx();     // send telemetry
         handleSbusIn();
         handleSbus2In();
-        fillSbusFrame();
       } else if (config.protocol == 'M') {  // multiplex
-        handleMpxRxTx();
+        handleMpxRxTx();       // send telemetry
         handleSbusIn();
         handleSbus2In();
-        fillSbusFrame();
       } else if (config.protocol == 'I') {  // Ibus flysky
         handleIbusRxTx();
         handleIbusIn();           
         //handleSbus2In();
-        fillSbusFrame();
       } else if (config.protocol == '2') { // Sbus2 Futaba
         handleSbusIn();
         handleSbus2In();
-        fillSbusFrame();
       } else if (config.protocol == 'F') {  // Fbus frsky
         handleFbusRxTx();
         handleSbus2In();
-        fillSbusFrame();
       } else if (config.protocol == 'L') {  // SRXL2 Spektrum
         handleSrxl2RxTx();
         //handleSbus2In();  // to do processa second inpunt
-        fillSbusFrame();
       } else if (config.protocol == 'E') {  // Jeti Exbus
         handleExbusRxTx();
-        //handleSbus2In();  // to do processa second inpunt
-        fillSbusFrame();
+        //handleSbus2In();  // to do process a second inpunt
+      /* Add I2C Protocols */
       } else if (config.protocol == 'R') {  // RadioLink
         handleRlink();
       } else if (config.protocol == 'X') {  // Spektrum Xbus
-        //handleXbus(0x16);
+        handleXbusSpektrum();
       } else if (config.protocol == 'T') {  // RadioLink
-        //handleHitec();
+        handleHitec();
       }
+      /* Add I2C Protocols */
       watchdog_update();
-      if (gyroIsInstalled) {
-        calibrateGyroMixers();   // check if user ask for gyro calibration 
+        // apply failsafe values on sbusframe if rchannel frames are missing more that X msec
+        // convert sbusframe in rcChannelUs (when a new sbusframe is received or at least once every 9 msec) and copy to rcChannelUsCorr (so ready to apply gyro corrections)
+      // rcChannelsUs is used by logger and sequencer; rcChannelCorrUs is used by Gyro, PWM and SbusOut
+      setRcChannels();         // coded in sbus_out_pwm.cpp, set rcChannelsUsCorrChanged and rcChannelsUsChanged 
+      if (gyroIsInstalled) {   // coded in Gyro.cpp
+        calibrateGyroMixers();   // check if user ask for gyro calibration
+        applyGyroCorrections();  // apply corrections (if rcChannelsCorrUs changed) 
       }
-      updatePWM(); // update PWM pins only based on channel value (not sequencer); this will call applyGyroCorrections if gyro is used
-      
+      setLedState();                // set the color of the led
+      fillSbusFrame(); // once per 9 msec convert current rcChannelsUsCorr back to Sbus format and generate the sbus frame
+      updatePWM(); // update PWM pins only based on channel values with corrections (not sequencer); 
+      rcChannelsUsCorrChanged = false;  // reset the flag used to avoid updates at each loop
+      rcChannelsUsChanged = false;
+      newRcChannelsFrameReceived = false;
+
       sequencerLoop();  // update PWM pins based on sequencer
       if ((config.pinLogger != 255) && (newRcChannelsReceivedForLogger)) { // when logger is on and new RC data have been converted in uint16
         newRcChannelsReceivedForLogger = false; // reset the flag allowing a log of RC channels
@@ -688,10 +755,7 @@ void loop() {
   //  printf("p\n");
   //} 
   //enlapsedTime(0);
-  //printf("end of loop\n");sleep_ms(100); 
-  if (config.pinSpiCs != 255) {
-    loraHandle() ;
-  }  
+  //printf("end of loop\n");sleep_ms(100);   
 }
 
 // initialisation of core 1 that capture the sensor data
@@ -705,14 +769,26 @@ void loop1(){
     //startTimerUs(MAIN_LOOP1);
     uint8_t qCmd;
     getSensors(); // get sensor
+    if (config.pinSpiCs != 255) {
+        loraHandle() ;
+    }
     // get some request from core0
     if ( ! queue_is_empty(&qSendCmdToCore1)){
         queue_try_remove(&qSendCmdToCore1, &qCmd);
-        if ( qCmd == REQUEST_HORIZONTAL_MPU_CALIB) { // 0X01 is the code to request an horizontal calibration
-            mpu.calibrationHorizontalExecute();
-        } else if ( qCmd == REQUEST_VERTICAL_MPU_CALIB) { // 0X02 is the code to request a vertical calibration
-            mpu.calibrationVerticalExecute();
-        }
+        if ( qCmd == REQUEST_USB_HORIZONTAL_MPU_CALIB) { // 0X01 is the code to request an horizontal calibration
+            mpu.usbOrientationHorizontalExecute();
+        } else if ( qCmd == REQUEST_USB_VERTICAL_MPU_CALIB) { // 0X02 is the code to request a vertical calibration
+            mpu.usbOrientationVerticalExecute();
+        } else if (qCmd == REQUEST_NEXT_ACC_CALIB) {
+            mpu.nextAccCalibrationExecute();
+        } else if (qCmd == REQUEST_HORIZONTAL_MPU_ORIENTATION ) {
+            mpu.orientationExecute(true);
+        } else if (qCmd == REQUEST_VERTICAL_MPU_ORIENTATION ) {
+            mpu.orientationExecute(false); // perform check Vertical orientation
+        } else if (qCmd == REQUEST_GYRO_CALIBRATION ) {
+            mpu.gyroCalibrationExecute(); // perform gyro calibration
+        } 
+        
     }
     //alarmTimerUs(MAIN_LOOP1, 500);
 }

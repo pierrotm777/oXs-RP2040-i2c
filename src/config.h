@@ -1,16 +1,16 @@
 #pragma once
 
 #include <stdint.h>
-#define VERSION "2.11.44 & I2C"
+#define VERSION "3.0.11 & I2C"
 
-//#define DEBUG  // force the MCU to wait for some time for the USB connection; still continue if not connected
+#define DEBUG  // force the MCU to wait for some time for the USB connection; still continue if not connected
 
 // Here some additional parameters that can't be changed via the serial terminal 
 
 // -----------  for Sport and Fbus protocols -------------------------------
 #define SPORT_DEVICEID    DATA_ID_FAS  // this line defines the physical ID used by sport. 
 
-// default SPORT_SENSOR_ID use by some original frsky sensors
+// default SPORT_SENSOR_ID used by some original frsky sensors
 #define DATA_ID_VARIO  0x00  // = sensor 0 used for Vspeed, GPS long and lat as P1
 #define DATA_ID_FLVSS  0xA1  //          1 used as P2
 #define DATA_ID_FAS    0x22  //          2
@@ -21,7 +21,6 @@
 //list of all possible 28 device ID codes (in sequence)
 // 0x00,0xA1,0x22,0x83,0xE4,0x45,0xC6,0x67,0x48,0xE9,0x6A,0xCB,0xAC,0x0D,0x8E,0x2F, 
 // 0xD0,0x71,0xF2,0x53,0x34,0x95,0x16,0xB7,0x98,0x39,0xBA,0x1B
-
 
 
 // -------------- for Sport, Fbus (Frsky) and Exbus (Jeti) ---------------------
@@ -37,7 +36,6 @@
 // There is no need to set the value to 0 for fields not available (e.g. for GPS fields if GPS pins are undefined)
 // Note : currently some fields are never transmitted in exbus protocol (even if they have a valid value here)
 //        For more details about the fields, look at the file doc/fields_per_protocol.txt 
-
 
 #define P_LATITUDE             50
 #define P_LONGITUDE            50
@@ -84,7 +82,6 @@
 #define P_RESERVE5            200
 #define P_RESERVE6            200
 #define P_RESERVE7            200
-
 
 // -------------- for ELRS protocol  ------------------------------
 #define VOLTAGE_FRAME_INTERVAL 500 // This version transmit only one voltage; it could be change in the future
@@ -149,6 +146,16 @@
 //#define MPX_ALARM_TEMP2_MAX 100  // alarm when temp2 (in degree) is higher than this value
 //#define MPX_ALARM_CM_MAX 12000  // alarm when relative altitude (in cm) is higher than this value
 
+// --------- For Hott protocol ------------------
+// It is possible to let the handset generate a warning when the voltage (volt1) is lower than a value
+// uncomment next line if you want to get such a warning and specify the min voltage that trigger the warning (in milliVolt)
+//#define HOTT_MIN_VOLTAGE 16000 // in millivolt
+
+// It is possible to let the handset generate a warning when the consumed capacity (based on cummulated current- volt2) is more than a value
+// uncomment next line if you want to get such a warning and specify the max consumed capacity (in mAh)
+//#define HOTT_MAX_CONSUMED_CAPACITY 2000 // in mAh
+
+// note: when both lines are uncommented and both alarms are activated (voltage is low and capacity is high), oXs will transmit only the code for low voltage
 
 // -------- Parameters for SRXL2 protocol ---------------------------
 //#define USE_GPS_BCD_INSTEAD_OF_BINARY  // default is GPS binary format used; uncomment this line if you want to use BCD format instead of binary 
@@ -163,12 +170,26 @@
 //#define EXTENDED_RANGE_UP_TO_CHANNEL 6 // (range 1/16) ;uncoment those 2 lines if you want extended PWM usec range for some (a range) servos
 #define EXTENDED_TO_PWM_MIN 500
 #define EXTENDED_TO_PWM_MAX 2500
+
+// --------- For Sbus ouput ------------------
+// SBus signal is normally an inverted UART signal
+// uncomment next line if you want to let oXs generate a normal UART signal (so an inverted Sbus)
+//#define INVERT_SBUS_OUTPUT 
+
 // -------- Parameters for the vario -----
 #define SENSITIVITY_MIN 100
 #define SENSITIVITY_MAX 300
 #define SENSITIVITY_MIN_AT 100
 #define SENSITIVITY_MAX_AT 1000
 #define VARIOHYSTERESIS 5
+
+// --------- Parameters for current ---------------------------------------------------
+// When a pin is defined for Volt2, the measured voltage is converted to a current.
+// When a Hall sensors are used, there is usually an offset (voltage is not zero when current is zero).
+// It is possible to manually define this offset.
+// It is also possible to let oXs calculates automatically this offset using the value measured within 5 sec after power on.
+// To do so, uncomment next line.
+//#define CURRENT_AUTO_OFFSET
 
 // --------- Parameters for Temperature(s) when measured by a thermistor ---------------
 // uncomment the next line when a thermistor is used instead of a TP36 ic and then specify the pull up resitor and the NTC param
@@ -184,7 +205,7 @@
 //                        this can be done using a FTDI and program GnssToolkit3.exe (to download from internet)
 
 // --------- Parameter for RPM -------------------
-#define RPM_COUNTER_INTERVAL_USEC 100000 // in usec (so 100000 = 100 msec)
+#define RPM_COUNTER_INTERVAL_USEC 1000000 // in usec (so 1000000 = 1 sec)
 
 // --------- Parameters for Ads1115 ----------------
 #define I2C_ADS_Add1 0x48 // I2C address of ads1115 when addr pin is connected to ground
@@ -193,14 +214,14 @@
 #define ADS1_MEASURE A0_TO_GND ,  A1_TO_GND , A2_TO_GND , A3_TO_GND // select 4 values between A0_TO_A1, A0_TO_A3, A1_TO_A3, A2_TO_A3, A0_TO_GND, A1_TO_GND, A2_TO_GND, A3_TO_GND, ADS_OFF
 #define ADS1_FULL_SCALE_VOLT  MV4096, MV4096, MV4096, MV4096 //  select between MV6144 MV4096 MV2048 MV1024 MV512 MV256
 #define ADS1_OFFSET 0.0, 0.0 , 0.0 , 0.0 // can be a float (positive or negative)
-#define ADS1_SCALE 3.7, 3.7, 3.7, 3.7 // can be a float
+#define ADS1_SCALE 1.0, 1.0, 1.0, 1.0 // can be a float
 #define ADS1_RATE  MS5 , MS5, MS5 , MS5 // select between MS137, MS69, MS35, MS18, MS9, MS5, MS3 , MS2
 #define ADS1_AVERAGING_ON 10 , 10, 10, 10 // number of values used for averaging (must be between 1 and 254) 
 
 #define ADS2_MEASURE A0_TO_GND ,  A1_TO_GND , A2_TO_GND , A3_TO_GND // select 4 values between A0_TO_A1, A0_TO_A3, A1_TO_A3, A2_TO_A3, A0_TO_GND, A1_TO_GND, A2_TO_GND, A3_TO_GND, ADS_OFF
 #define ADS2_FULL_SCALE_VOLT  MV4096, MV4096, MV4096, MV4096 //  select between MV6144 MV4096 MV2048 MV1024 MV512 MV256
 #define ADS2_OFFSET 0.0, 0.0 , 0.0 , 0.0 // can be a float (positive or negative)
-#define ADS2_SCALE 3.7, 3.7, 3.7, 3.7 // can be a float
+#define ADS2_SCALE 1.0, 1.0, 1.0, 1.0 // can be a float
 #define ADS2_RATE  MS5 , MS5, MS5 , MS5 // select between MS137, MS69, MS35, MS18, MS9, MS5, MS3 , MS2
 #define ADS2_AVERAGING_ON 10 , 10, 10, 10 // number of values used for averaging (must be between 1 and 254) 
 
@@ -227,20 +248,24 @@
 // --------- Parameters for Compensated Vspeed by airspeed ----------------
 #define DTE_DEFAULT_COMPENSATION_FACTOR 1.10  // used when a channel is not used to setup the factor
 
+// --------- Parameters for KX134 (64g accelerometer without gyro) -------------
+//#define KX134_IS_USED // uncomment this line to activate this line instead of a MPU6050
+// note: when activated, MPU6050 is automatically disabled (and so also all related functions roll/pitch/gyro...)
+#define KX134_DEFAULT_ADDRESS 0X1E // can be 0X1C, 0X1D, 0X1E, 0X1F (see datasheet - specifications)
+
 // ---------- ESC --------------------------------------------------------
 #define ESC_MAX_CURRENT 250000.0 // used for Hobbywing V4 to reject dummy values ; 250000 is in ma = 250 A 
-#define ESC_MIN_THROTTLE 254    // used for Hobbywing V4 to reject dummy values ; 1024 = 100%; so e.g. 256 = 25% of max
-
+//#define ESC_MIN_THROTTLE 254    // used for Hobbywing V4 to reject dummy values ; 1024 = 100%; so e.g. 256 = 25% of max
 // -------------- Camera stabilizer ----------------------------------------
 // uncomment PITCH_CONTROL_CHANNEL and/or ROLL_CONTROL_CHANNEL if you want to stabilize a camera on those axis)
  
-//#define PITCH_CONTROL_CHANNEL config.CamPitchChannel // Channel used to control the servo for the camera (pitch); uncomment to activate the pitch stabilization
-#define PITCH_RATIO_CHANNEL config.CamPitchRatio   // Channel used to set up the ratio between pitch and servo movement (optional)
+//#define PITCH_CONTROL_CHANNEL 16 // Channel used to control the servo for the camera (pitch); uncomment to activate the pitch stabilization
+#define PITCH_RATIO_CHANNEL 15   // Channel used to set up the ratio between pitch and servo movement (optional)
 #define PITCH_RATIO  100  // Ratio to use when PITCH_RATIO_CHANNEL is undefined (or 255); increase/decrease the value in case of under/over stabilisation  
 #define PITCH_MAX 100     // adapt upper limit of servo travel (should normally be the same value as on TX) 
 #define PITCH_MIN -100    // adapt lower limit of servo travel (should normally be the same value as on TX)
-//#define ROLL_CONTROL_CHANNEL config.CamRollChannel// Channel used to control the servo for the camera (roll); uncomment to activate the roll stabilization
-#define ROLL_RATIO_CHANNEL config.CamRollRatio    // Channel used to set up the ratio between roll and servo movement
+//#define ROLL_CONTROL_CHANNEL 14// Channel used to control the servo for the camera (roll); uncomment to activate the roll stabilization
+#define ROLL_RATIO_CHANNEL 13    // Channel used to set up the ratio between roll and servo movement
 #define ROLL_RATIO  100  // Ratio to use when ROLL_RATIO_CHANNEL is undefined (or 255); increase/decrease the value in case of under/over stabilisation
 #define ROLL_MAX 100     // adapt upper limit of servo travel 
 #define ROLL_MIN -100    // adapt lower limit of servo travel
@@ -270,10 +295,6 @@
 // If you want to make an uf2 flie with specific parameters (and so, avoid having to use the serial monitor commands),
 //     you can change the default parameters in this section
 // Note: those parameters are used only for a RP2040 that did not yet had been configured (or when it has been completely erased)
-
-//#include "config_Jeti.h"
-//#include "config_Sport.h"
-//#include "config_I2C.h"
 
  #define _pinChannels_1  0XFF
  #define _pinChannels_2  0XFF
@@ -307,12 +328,12 @@
  #define _pinLed  16
  #define _protocol  'S' // S = Sport, C = crossfire, J = Jeti
  #define _crsfBaudrate  420000
- #define _scaleVolt1  4.29// for 2S
- #define _scaleVolt2  50
+ #define _scaleVolt1  1.0
+ #define _scaleVolt2  1.0
  #define _scaleVolt3  1.0
  #define _scaleVolt4  1.0
  #define _offset1  0.0
- #define _offset2  82500
+ #define _offset2  0.0
  #define _offset3  0.0
  #define _offset4  0.0
  #define _gpsType  'U' 
@@ -327,11 +348,7 @@
 // #define _gyroOffsetZ;
 #define _temperature 0XFF
 #define _VspeedCompChannel 0XFF
-#define _ledInverted 'Y'
-#define _CamPitchChannel 0xFF
-#define _CamRollChannel 0xFF
-#define _CamPitchRatio 0xFF
-#define _CamRollRatio 0xFF
+#define _ledInverted 'N'
 #define _pinLogger 0xFF
 #define _loggerBaudrate 115200
 #define _pinEsc 0xFF
@@ -341,6 +358,19 @@
 #define _pinSpiSck  255   // 10, 14, 26 (for spi1)  or 2, 6, 18, 22 (for spi0)
 #define _pinSpiMosi 255     // 11, 15, 27 (for spi1)  or 3, 7, 18, 23 (for spi0)
 #define _pinSpiMiso 255     // 8, 12, 24, 28 (for spi1) or 0, 4, 16, 20 (for spio)
+#define _pinE220Busy 255    // pin for busy signal of E220-xxxMyy
+
+#define _accOffX 0.0;
+#define _accOffY 0.0;
+#define _accOffZ 0.0;
+#define _accScaleXX 1.0;
+#define _accScaleYY 1.0;
+#define _accScaleZZ 1.0;
+#define _accScaleXY 0.0;
+#define _accScaleXZ 0.0;
+#define _accScaleYZ 0.0;
+#define _pinHigh 255;   // force a level High on this pin (when defined between 0 and 29)
+#define _pinLow 255;   // force a level Low on this pin (when defined between 0 and 29)
 
 // ------  for gyro   -------
 #define _gyroChanControl 0xFF // Rc channel used to say if gyro is implemented or not and to select the mode and the general gain. Value must be in range 1/16 or 255 (no gyro)
@@ -377,7 +407,7 @@
 #define _pid_param_stab_KD_ELV 500  // PID rates: hold   mode - Kd - elv (pitch)
 #define _pid_param_stab_KD_RUD 500  // PID rates: hold   mode - Kd - rud (yaw)
 
-#define _pid_param_rate_output_shift 8 // do not modify
+#define _pid_param_rate_output_shift 8 // do not modify Initially it was 8
 #define _pid_param_hold_output_shift 8 // do not modify
 #define _pid_param_stab_output_shift 8 // do not modify
 
@@ -396,11 +426,42 @@
                                         // for both  0=X+, 1=X- , 2=Y+ , 3=Y- , 4=Z+, 5=Z- , 6=error ;
 
 // ------------- model locator -------------
+
+// for a Ebyte E220M900-22S module
 // next lines allow to select the frequency being used by the locator (in 3 bytes most, mid, less).
 // It must be the same values on oXs side and on locator receiver side
-#define LORA_REG_FRF_MSB                            0x06  //frequency (in steps of 61.035 Hz)
-#define LORA_REG_FRF_MID                            0x07  //frequency
-#define LORA_REG_FRF_LSB                            0x08  //frequency
+// We use the same frequency for transmit and receive
+#define LOCATOR_FREQUENCY 868000000UL // in Hz
+
+#define _power 16     // in Dbm; max value is 22 db for E220-900M22S
+
+// Define modulation parameters setting
+// range increases (and time over the air too) when sf increases and BW decrease 
+#define _sf  10                 // spreading factor 7; can be between 5 and 11 (higher = higher range)
+                               // when sf=11, BW must be 500; when sf=10, BW must be 250 or 500, when sf < 10, bw can be 125,250 or 500
+#define _bw  SX126X_BW_250000  // 125 kHz     ; can be 125000(4) 250000(5) 500000(6) (smaller = higher range; 125 is not supported with sf11)
+#define _cr  SX126X_CR_4_8     // 4/5 code rate ; can be 4_5, 4_6, 4_7, 4_8
+#define _ldro  SX126X_LDRO_ON // low data rate optimize off, can be ON or OFF
+
+// Define packet parameters setting
+#define _preambleLength  12                // 12 bytes preamble
+
+
+//----- For RFM95 only (define the frequency D9 00 00 => 868Mhz)
+//#define USE_RFM95      // uncomment this line to activate a RFM95 instead of a E220M900-22S
+#define RX_FRF_MSB   0xD9
+#define TX_FRF_MID   0x00   
+#define TX_FRF_LSB   0x00
+
+#define RX_FRF_MSB   0xD9 
+#define RX_FRF_MID   0x00  
+#define RX_FRF_LSB   0x00
+
+
+// Next lines allows to define the timing (e.g. sleep_time can be increased to reduce consumption)
+#define SLEEP_TIME 5000 // sleep during xx milli sec before listening 
+#define SHORT_RECEIVE_TIME 5000  // stay max in listening mode for xx milli sec; if no packet, then go to sleep
+#define LONG_RECEIVE_TIME 60000  // stay in receive for YY millisec (1 min) after receiving a packet
 
 
 // --------- Reserve for developer. ---------
@@ -416,3 +477,4 @@ typedef struct {
 
 //#define YES 1
 //#define NO 0
+

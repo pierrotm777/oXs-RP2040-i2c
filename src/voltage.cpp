@@ -45,20 +45,27 @@ void VOLTAGE::getVoltages(void){
     float value;
     uint16_t adcValue;
     static uint8_t adcSeq = 0; // sequence 0...3 of pin to be read 
+    static float currentOffsetSum = 0;  // sum adv current value during 5 sec
+    static uint32_t currentOffsetCount = 0; // count current value during 5 sec
+    static float currentAutoOffset = -1; // set with negative value to detect if it is already calculated or not
     if ( config.pinVolt[0] == 255 and config.pinVolt[1] == 255 and config.pinVolt[2] == 255 and config.pinVolt[3] == 255 ) return ;
     if ( (microsRp() - lastVoltageMicros) > VOLTAGEINTERVAL ) {  // performs one conversion every X usec
         lastVoltageMicros = microsRp() ;
         if ( config.pinVolt[adcSeq] != 255) {
             adc_read(); // convert and sum
             //printf("V=%i\n",(int) adc_read());
-            adcValue = adc_read();
-//            if (adcValue < adcMin[adcSeq]) adcMin[adcSeq] = adcValue;
-//            if (adcValue > adcMax[adcSeq]) adcMax[adcSeq] = adcValue;
-            sumVoltage[adcSeq] += adcValue; // convert and sum
-            adcValue = adc_read();
-//            if (adcValue < adcMin[adcSeq]) adcMin[adcSeq] = adcValue;
-//            if (adcValue > adcMax[adcSeq]) adcMax[adcSeq] = adcValue;
-            sumVoltage[adcSeq] += adcValue; // convert and sum
+            //if (adcSeq==1){    // to do : just for test; must be removed
+            //     sumVoltage[adcSeq] += 3000;
+            //} else {
+                adcValue = adc_read();
+    //            if (adcValue < adcMin[adcSeq]) adcMin[adcSeq] = adcValue;
+    //            if (adcValue > adcMax[adcSeq]) adcMax[adcSeq] = adcValue;
+                sumVoltage[adcSeq] += adcValue; // convert and sum
+                adcValue = adc_read();
+    //            if (adcValue < adcMin[adcSeq]) adcMin[adcSeq] = adcValue;
+    //            if (adcValue > adcMax[adcSeq]) adcMax[adcSeq] = adcValue;
+                sumVoltage[adcSeq] += adcValue; // convert and sum
+            //}
         }     
         adcSeq = (adcSeq + 1) & 0X03 ; // increase seq and keep in range 0..3
         if ( config.pinVolt[adcSeq] != 255) {
@@ -74,10 +81,32 @@ void VOLTAGE::getVoltages(void){
                 if ( config.pinVolt[cntInit] != 255) {  // calculate average only if pin is defined  
                     //fields[cntInit + MVOLT].value = ( ((float) sumVoltage[cntInit]) / (( float) SUM_COUNT_MAX_VOLTAGE) * mVoltPerStep[cntInit]) - offset[cntInit];
                     if (mVoltPerStep[cntInit] !=0) {
-                        value =  ( ((float) sumVoltage[cntInit]) / (( float) SUM_COUNT_MAX_VOLTAGE * 2.0) * mVoltPerStep[cntInit])\
-                                 - offset[cntInit];
+
+                        value =   ((float) sumVoltage[cntInit]) / (( float) SUM_COUNT_MAX_VOLTAGE * 2.0) ;
+                        #ifdef CURRENT_AUTO_OFFSET
+                        if (cntInit == 1) {
+                            if (millisRp() < 5000) { // calculate average on 5 first sec
+                                currentOffsetSum += value;
+                                currentOffsetCount++;
+                                value = 0; // set to 0 to avoid to include it into capacity
+                            } else {
+                                if (currentAutoOffset < 0){ // when offset is not yet calculated
+                                    if ( currentOffsetCount > 0){
+                                        currentAutoOffset = currentOffsetSum / currentOffsetCount ;
+                                    } else {
+                                        currentAutoOffset = 0;
+                                    }
+                                }
+                                //if (msgEverySec(1)){
+                                //    printf("offset=%fn",currentAutoOffset);
+                                //}
+                                value = value - currentAutoOffset; 
+                                
+                            }    
+                        }
+                        #endif
+                        value = value * mVoltPerStep[cntInit] - offset[cntInit];
                         // Volt3 and Volt 4 can be used as temperature or voltage depending on value of config.temperature
-                        // volt 2 is used for current and consumed capacity is then calculated too
                         if ( (cntInit == 2) && (config.temperature == 1 || config.temperature == 2) ) {
                             #ifdef RESISTOR_FOR_TEMPERATURE
                             value = ((float) sumVoltage[cntInit]) / (( float) SUM_COUNT_MAX_VOLTAGE * 2.0);
@@ -93,6 +122,7 @@ void VOLTAGE::getVoltages(void){
                         } else {
                             sent2Core0( cntInit + MVOLT, (int32_t) value ); // save as MVOLT, CURRENT, RESERVE1 or RESERVE2
                         }
+                        // volt 2 is used for current and consumed capacity is then calculated too
                         if (cntInit == 1) { // when we are calculating a current we calculate also the consumption
                             
                             consumedMah += (value * (millisRp() - lastConsumedMillis)) / 3600000.0 ;  // in mah.
@@ -129,3 +159,4 @@ void  VOLTAGE::convertNtcVoltToTemp (float &adcValue ) {     //Calculate tempera
         adcValue = steinhart ;    
     }  // end convertNtcVoltToTemp 
 #endif
+

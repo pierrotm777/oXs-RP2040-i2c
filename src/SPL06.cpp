@@ -16,18 +16,27 @@ extern float actualPressurePa; // used to calculate airspeed
 //
 // PUBLIC
 //
-SPL06::SPL06(uint8_t deviceAddress)
+SPL06::SPL06()
 {
-  _address           = deviceAddress;
+  //_address           = 0X76;
 }
 
 void SPL06::begin()  // baroInstalled = true when baro exist
+{ 
+    tryAddress(0X76);
+    if ( baroInstalled == false) {
+        tryAddress(0X77);
+    }
+}
+    
+void SPL06::tryAddress(uint8_t address)
 {
   baroInstalled = false;
   uint8_t writeCmd[2];
   uint8_t readValue;
   uint8_t regToRead; 
   if ( config.pinScl == 255 or config.pinSda == 255) return; // skip if pins are not defined
+  _address = address;
   writeCmd[0] = SPL06_RST_REG ;  // reset the device
   writeCmd[1] = 0X89 ; // OX89 means clear fifo and soft reset
   sleep_ms(40);
@@ -123,7 +132,7 @@ void SPL06::requestPressure(){ // return true when cmd is successful
   writeCmd[0] = SPL06_MODE_AND_STATUS_REG ;  
   writeCmd[1] = SPL06_MEAS_PRESSURE ;
   if (i2c_write_timeout_us (i2c1 , _address, &writeCmd[0] , 2 , false,1000) <0 ){
-    printf("Write error for SPL06\n");
+    printf("Write error for SPL06 in RequestPressure\n");
     _result = -1; // _1 shows an error
   }  
 }
@@ -153,7 +162,7 @@ void SPL06::requestTemperature(){
   writeCmd[0] = SPL06_MODE_AND_STATUS_REG ;  
   writeCmd[1] = SPL06_MEAS_TEMPERATURE ;
   if (i2c_write_timeout_us (i2c1 , _address, &writeCmd[0] , 2 , false, 1000) <0) {
-    printf("Write error for SPL06\n");
+    printf("Write error for SPL06 in requestTemperature\n");
     _result = -1; // _1 shows an error
   }  
 }
@@ -164,11 +173,11 @@ void SPL06::getTemperature(){
     int32_t spl06_temperature;
     uint8_t regToRead = SPL06_TEMPERATURE_START_REG ;  
     if (i2c_write_timeout_us (i2c1 , _address, &regToRead , 1 , false, 1000) < 0) {
-        printf("Write error for SPL06\n");
+        printf("Write error for SPL06 in getTemperature\n");
         _result = -1; // _1 shows an error
     }
     if (i2c_read_timeout_us (i2c1 , _address , &data[0] , SPL06_TEMPERATURE_LEN , false, 1500) <0){
-        printf("Read error for temperature on SPL06\n");
+        printf("Read error for SPL06 in getTemperature\n");
         _result = -1 ;
     }      
  

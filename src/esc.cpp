@@ -31,6 +31,61 @@
 // [15..16] temp FET (to convert)
 // [17..18] temp BEC (to convert)
 
+/*  Hobbywing V4
+1.Frame with 19bytes = telemetry
+2.Frame with 13bytes = signature
+Before throttle is raised from 0, signature packets are sent between telemetry packets. This is used to identify the hardware and firmware of the ESC.
+Telemetry packets:
+Byte | 1 | 2 | 3 | 4 | 5 | 6 |
+Value | Package Head (0x9B) | Package Number 1 | Package Number 2 | Package Number 3 | Rx Throttle 1 | Rx Throttle 2 |
+7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 |
+Output PWM 1 | Output PWM 2 | RPM 1 | RPM 2 | RPM 3 | Voltage 1 | Voltage 2 | Current 1 | Current 2 | TempFET 1 |
+17 | 18 | 19
+TempFET 2 | Temp 1 | Temp 2
+Signature packets:
+Byte | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13
+V4LV25/60/80A | 0x9B | 0x9B | 0x03 | 0xE8 | 0x01 | 0x08 | 0x5B | 0x00 | 0x01 | 0x00 | 0x21 | 0x21 | 0xB9
+*/
+
+/*
+ * Hobbywing V5 Telemetry
+ *
+ *    - Serial protocol 115200,8N1
+ *    - Frame rate running:50Hz idle:2.5Hz
+ *    - Little-Endian fields
+ *    - Frame length over data (23)
+ *    - CRC16-MODBUS (poly 0x8005, init 0xffff)
+ *    - Fault code bits:
+ *         0:  Motor locked protection
+ *         1:  Over-temp protection
+ *         2:  Input throttle error at startup
+ *         3:  Throttle signal lost
+ *         4:  Over-current error
+ *         5:  Low-voltage error
+ *         6:  Input-voltage error
+ *         7:  Motor connection error
+ *
+ * Frame Format
+ * ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+ *    0-5:      Sync header (0xFE 0x01 0x00 0x03 0x30 0x5C)
+ *      6:      Data frame length (23)
+ *    7-8:      Data type 0x06 0x00
+ *      9:      Throttle value in %
+ *  10-11:      Unknown
+ *     12:      Fault code
+ *  13-14:      RPM in 10rpm steps
+ *  15-16:      Voltage in 0.1V
+ *  17-18:      Current in 0.1A
+ *     19:      ESC Temperature in °C
+ *     20:      BEC Temperature in °C
+ *     21:      Motor Temperature in °C
+ *     22:      BEC Voltage in 0.1V
+ *     23:      BEC Current in 0.1A
+ *  24-29:      Unused 0xFF
+ *  30-31:      CRC16 MODBUS
+*/
+
+
 // ------ Kontronix ------------------------
 // ESC sent on uart (115200 8E1) a frame every 10 msec that contains
 // "KODL" as header
@@ -70,7 +125,7 @@
 //Byte13: State-H
 //Byte14: State-L
 //Byte15: Mah-used H high value of the used/consumed power
-//Byte16: Mah-used L low value of the used/consumed power (unit = ????)
+//Byte16: Mah-used L low value of the used/consumed power (unit = mah)
 //Byte17: UART-TH serial throttle input
 //Byte18: CAN-TH can throttle
 //Byte19: BEC voltage (0-25V) so in 0.1V
@@ -110,6 +165,13 @@
 #define ESC_HOBBYV4_MAX_FRAME_LEN 19
 // interval = 20000 usec but 19 bytes at 19200 = nearly 10000usec 
 #define ESC_HOBBYV4_MIN_FREE_TIME_US 8000 // minimum interval without uart signal between 2 frames
+
+#define ESC_HOBBYV5_BAUDRATE 115200
+#define ESC_HOBBYV5_MAX_FRAME_LEN 32 // payload is only 23 but total frame is 32 bytes
+// interval = 20000 usec but 19 bytes at 19200 = nearly 10000usec 
+#define ESC_HOBBYV5_MIN_FREE_TIME_US 8000 // minimum interval without uart signal between 2 frames
+
+
 #define ESCHW4_NTC_BETA 3950.0
 #define ESCHW4_NTC_R1 10000.0
 #define ESCHW4_NTC_R_REF 47000.0
@@ -140,9 +202,14 @@
 // 10 byte at 115200 = nearly 1100 usec; there is one frame per 36000usec (or 50000)
 #define ESC_BLH_MIN_FREE_TIME_US 5000 // minimum interval without uart signal between 2 frames
 
+// Jeti ESC
+#define ESC_JETI_BAUDRATE 9600
+#define ESC_JETI_MAX_FRAME_LEN 69 // Length can vary  but should not exceed 69
+#define ESC_JETI_MIN_FREE_TIME_US 2000 // it seems to work with 2000; there is a frame each 20ms
+
 
 // Len here must be big enough to contain all types of ESC frame
-#define ESC_MAX_BUFFER_LEN 50
+#define ESC_MAX_BUFFER_LEN 100 // jeti seems to have 32+2+29+5? = about 70
 
 queue_t escRxQueue ;
 
@@ -184,6 +251,9 @@ void setupEsc(){
     } else if ( config.escType == HW3) { 
         escMaxFrameLen = ESC_HOBBYV3_MAX_FRAME_LEN;
         escFreeTimeUs = ESC_HOBBYV4_MIN_FREE_TIME_US;
+    } else if ( config.escType == HW5) { 
+        escMaxFrameLen = ESC_HOBBYV5_MAX_FRAME_LEN;
+        escFreeTimeUs = ESC_HOBBYV5_MIN_FREE_TIME_US;
     } else if ( config.escType == KONTRONIK) { 
         escMaxFrameLen = ESC_KONTRONIK_MAX_FRAME_LEN;
         escFreeTimeUs = ESC_KONTRONIK_MIN_FREE_TIME_US;
@@ -194,6 +264,11 @@ void setupEsc(){
     } else if ( config.escType == BLH) { 
         escMaxFrameLen = ESC_BLH_MAX_FRAME_LEN;
         escFreeTimeUs = ESC_BLH_MIN_FREE_TIME_US;
+    } else if ( config.escType == JETI_ESC) { 
+        escMaxFrameLen = ESC_JETI_MAX_FRAME_LEN;
+        escFreeTimeUs = ESC_JETI_MIN_FREE_TIME_US;
+        escShift = 22;             // for 9O1 uart, we shift by 23 pos instead of 24 because we get 9 bit instead of 8
+
     } 
 // configure the queue to get the data from ESC in the irq handle
     queue_init (&escRxQueue, sizeof(uint16_t), 50);
@@ -206,6 +281,9 @@ void setupEsc(){
         escOffsetRx = pio_add_program(escPioRx, &esc_uart_rx_8N1_program);
         esc_uart_rx_8N1_program_init(escPioRx, escSmRx, escOffsetRx, config.pinEsc, ESC_HOBBYV4_BAUDRATE , false); // false = not inverted   
         //setupListMpxFieldsToReply();
+    } else if (config.escType == HW5){
+        escOffsetRx = pio_add_program(escPioRx, &esc_uart_rx_8N1_program);
+        esc_uart_rx_8N1_program_init(escPioRx, escSmRx, escOffsetRx, config.pinEsc, ESC_HOBBYV5_BAUDRATE , false); // false = not inverted   
     } else if (config.escType == KONTRONIK){
         escOffsetRx = pio_add_program(escPioRx, &esc_uart_rx_8E1_program);
         esc_uart_rx_8E1_program_init(escPioRx, escSmRx, escOffsetRx, config.pinEsc, ESC_KONTRONIK_BAUDRATE , false); // false = not inverted
@@ -215,6 +293,9 @@ void setupEsc(){
     }  else if (config.escType == BLH){
         escOffsetRx = pio_add_program(escPioRx, &esc_uart_rx_8N1_program);
         esc_uart_rx_8N1_program_init(escPioRx, escSmRx, escOffsetRx, config.pinEsc, ESC_BLH_BAUDRATE , false); // false = not inverted
+    }  else if (config.escType == JETI_ESC){
+        escOffsetRx = pio_add_program(escPioRx, &esc_uart_rx_9O1_program);
+        esc_uart_rx_9O1_program_init(escPioRx, escSmRx, escOffsetRx, config.pinEsc, ESC_JETI_BAUDRATE , false); // false = not inverted
     }
     //#define DEBUG_ESC
     #ifdef  DEBUG_ESC
@@ -228,8 +309,13 @@ void escPioRxHandlerIrq(){    // when a byte is received on the esc bus, read th
   // clear the irq flag
     irq_clear (PIO0_IRQ_1 );
     uint32_t nowMicros = microsRp();
+    uint16_t c ;
     while (  ! pio_sm_is_rx_fifo_empty (escPioRx ,escSmRx)){ // when some data have been received
-        uint16_t c = (pio_sm_get (escPioRx , escSmRx) >> escShift) &0xFF;         // read the data, shift by 24 or 23 and keep 8 bits
+        if ( config.escType == JETI_ESC) {
+            c = (pio_sm_get (escPioRx , escSmRx) >> escShift) &0x01FF;      // read the data, shift by 22 and keep 9 bits (not the parity bit)
+        } else {
+         c = (pio_sm_get (escPioRx , escSmRx) >> escShift) &0x00FF;         // read the data, shift by 24, 23 or 22 and keep 8 bits
+        }
         // here we discard the parity bit from Kontronik and ZWT1
          //when previous byte was received more than X usec after the previous, then add 1 in bit 15 
         if ( ( nowMicros - lastEscReceivedUs) > escFreeTimeUs ) c |= 0X8000 ; // add a flag when there is a gap between char
@@ -248,7 +334,7 @@ void handleEsc(){
     static bool pullupHW = false;
     if (config.pinEsc == 255) return ; // skip when esc is not foreseen
     // for hobbywing ESC, we have to activate the pullup only after 2 sec otherwise ESC do not start
-    if (config.escType == HW4) {
+    if ( (config.escType == HW4) or (config.escType == HW5) ){
         if ((pullupHW == false) and (millisRp() > 3000)) {
             gpio_pull_up(config.pinEsc);
             pullupHW = true;
@@ -265,12 +351,25 @@ void handleEsc(){
             continue ; // discard the car if buffer is full (should not happen)    
         }
         // to debug the char being received
-        //if (config.escType == ZTW1) printf("%4X\n",data ); 
-        
-        escRxBuffer[escRxBufferIdx++] = (uint8_t) data; // store the byte in the buffer
-        if (escRxBufferIdx == escMaxFrameLen) {         // when buffer is full, process it
-            processEscFrame(); // process the incoming byte
-        }     
+        if ((config.escType == ZTW1) )printf("%4X\n",data ); 
+        if (config.escType == JETI_ESC){
+            if (data == 0XFE) { //start of jetibox ascii = 34 bytes including start and end
+                //printf("Start\n");
+                escRxBufferIdx = 0; // reset the counter
+                escRxBuffer[escRxBufferIdx++] = (uint8_t) data; // store the start byte in the buffer            
+            } else if (data == 0XFF) { // when end has been detected, process the frame
+                //printf("Process\n");
+                processJetiboxEscFrame();
+                escRxBufferIdx = 0; // reset the counter
+            } else if ((escRxBufferIdx > 0) and (escRxBufferIdx < 34)) { // when start has been detected, Idx is > 0
+                escRxBuffer[escRxBufferIdx++] = (uint8_t) data; // store the byte in the buffer
+            } // otherwise discard the byte (when start has not been detected)   
+        } else {                 // not a jeti esc  
+            escRxBuffer[escRxBufferIdx++] = (uint8_t) data; // store the byte in the buffer
+            if (escRxBufferIdx == escMaxFrameLen) {         // when buffer is full, process it
+                processEscFrame(); // process the incoming byte
+            }     
+        }    
     } // end while
     #ifdef DEBUG_ESC // generate a frame once per 10 msec
     static uint32_t lastZWT1Ms;
@@ -286,17 +385,65 @@ void handleEsc(){
 float escConsumedMah = 0;
 uint32_t lastEscConsumedMicros = 0;
 
-void processEscFrame(){ // process the incoming byte 
+
+int digit(uint8_t i){ // return the digit or 0 when it is not a digit
+        if (escRxBuffer[i] >= 0x30 and escRxBuffer[i] <= 0x39) return escRxBuffer[i] - 0x30;
+    return 0;
+}
+
+void processJetiboxEscFrame(){
+    // first byte is start byte
+    //                1 6 ,  2  V   
+    // then we have e.g. 
+    // FE 31 36 2C 30 56 20 42 31 30 30 25 20 32 34 DF 43 20 20 20 20 30 41 20 20 20 20 20 20 30 72 70 6D
+    //  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32
+    //     1  6  ,  0  V     B  1  0  0  %     2  4  °  C              0  A                    0  r  p  m
+    // Note B is sometime replaced by R
+    //for (uint8_t i = 0; i<=32; i++){
+    //    printf("%2X ", escRxBuffer[i]);
+    //}
+    //printf("\n");
+    if (escRxBuffer[5] == 'V' and escRxBuffer[3] == ',') {
+        int32_t volt = digit(1)*10000 + digit(2)*1000 + digit(4)*100;
+        if (config.pinVolt[0] == 255) { // when volt1 is defined, we discard voltage from esc
+            sent2Core0( MVOLT, volt ) ; 
+        }
+    }
+    if (escRxBuffer[15] == 0xDF and escRxBuffer[16] == 'C') {
+        int32_t degree = digit(12)*100 + digit(13)*10 + digit(14);
+        if ((config.pinVolt[2] == 255) or ((config.temperature != 1)  and (config.temperature != 2))){ //  we discard temp from esc
+            sent2Core0( TEMP1, degree) ;
+        }
+    }        
+    if (escRxBuffer[22] == 'A') {
+        int32_t current = digit(18)*1000000 + digit(19) * 100000 + digit(20)*10000 + digit(21) * 1000;
+        if (config.pinVolt[1] == 255) { 
+            sent2Core0( CURRENT, current) ; 
+        }
+    }
+    if (escRxBuffer[30] == 'r' and escRxBuffer[31] == 'p') {
+        int32_t rpm = digit(24)*100000 + digit(25)*10000 + digit(26)*1000 + digit(27) * 100 + digit(28)*10 + digit(29) ;
+        if (config.pinRpm == 255) { // when rpm pin is defined, we discard rpm from esc
+            sent2Core0( RPM,  (int32_t) ((float) rpm  * config.rpmMultiplicator  )) ; // in rpm
+        }
+    }        
+}
+
+void processEscFrame(){ // process the incoming byte (except the Jeti that is procesed in another function) 
     //To debug the frame
     //#define DEBUG_ESC_FRAME
     #ifdef DEBUG_ESC_FRAME
-    for (uint8_t i=0; i< escMaxFrameLen ; i++){
-         printf("%2X ",escRxBuffer[i] );   
+    if (config.escType == HW5) {  // added to debug only HW5
+        for (uint8_t i=0; i< escMaxFrameLen ; i++){
+             printf("%2X ",escRxBuffer[i] );   
+        }
+        printf("\n");
     }
-    printf("\n");
     #endif
     if (config.escType == HW4) { // when frame is received for Hobbywing V4
         processHW4Frame();
+    } else if (config.escType == HW5) {
+        processHW5Frame();
     } else if (config.escType == KONTRONIK) {
         processKontronikFrame();
     } else if (config.escType == ZTW1) {
@@ -339,15 +486,10 @@ void processHW4Frame(){
             }
             if (config.pinVolt[1] == 255) { 
                 float currentf = 0;
-                //if ( throttle > ESC_MIN_THROTTLE) { // current is calculated only when throttle is more than 1/4 of max value
-                    // float curr = raw_current*(V_REF/ADC_RES)/(DIFFAMP_GAIN*DIFFAMP_SHUNT) = original formule
-                    //                         * 3300 /4096 / (DIFFAMP_GAIN * 0.25 /1000) with DIFFAMP_GAIN = e.g. 10
-                    currentf = ((float)current) * config.scaleVolt2 - config.offset2;
-                //}
+                currentf = ((float)current) * config.scaleVolt2 - config.offset2;
                 if (currentf<0) currentf = 0;
                 if (currentf < ESC_MAX_CURRENT) { // discard when current is to high
                     sent2Core0( CURRENT, (int32_t)  currentf) ; 
-                
                     // calculate consumption
                     float interval = (float) (microsRp() - lastEscConsumedMicros);
                     if ((interval >0 ) && (interval < 800000)) {
@@ -391,6 +533,86 @@ int32_t calcTemp(float tempRaw){
 void processHW3Frame(){
 
 }
+/*
+*    0-5:      Sync header (0xFE 0x01 0x00 0x03 0x30 0x5C)
+ *      6:      Data frame length (23)
+ *    7-8:      Data type 0x06 0x00
+ *      9:      Throttle value in %
+ *  10-11:      Unknown
+ *     12:      Fault code
+ *  13-14:      RPM in 10rpm steps
+ *  15-16:      Voltage in 0.1V
+ *  17-18:      Current in 0.1A
+ *     19:      ESC Temperature in °C
+ *     20:      BEC Temperature in °C
+ *     21:      Motor Temperature in °C
+ *     22:      BEC Voltage in 0.1V
+ *     23:      BEC Current in 0.1A
+ *  24-29:      Unused 0xFF
+*/ 
+void processHW5Frame(){
+    if ((escRxBuffer[0] == 0xFE) and (escRxBuffer[1] == 0x01) and (escRxBuffer[2] == 0x00)\
+         and (escRxBuffer[3] == 0x03) and (escRxBuffer[4] == 0x30) and (escRxBuffer[5] == 0x5C)\
+         and (escRxBuffer[6] == 23) and (escRxBuffer[7] == 0x06) and (escRxBuffer[8] == 0)\
+         and (escRxBuffer[24] == 0xFF) and (escRxBuffer[25] == 0xFF) and (escRxBuffer[26] == 0xFF)\
+         and (escRxBuffer[27] == 0xFF) and (escRxBuffer[28] == 0xFF) and (escRxBuffer[29] == 0xFF)){   //0-5: Sync header (0xFE 0x01 0x00 0x03 0x30 0x5C), 66: Data frame length (23)
+        int throttle = escRxBuffer[9] ;
+        int rpm = escRxBuffer[14] << 8 | escRxBuffer[13];   //in 10 rpm steps
+        int voltage = escRxBuffer[16] << 8 | escRxBuffer[15]; // in 0.1V
+        int current = escRxBuffer[18] << 8 | escRxBuffer[17]; // in 0.1A
+        int tempFet = escRxBuffer[19]; // in °c
+        int tempBec = escRxBuffer[20]; // in °c
+        //if (throttle < 101 ) {
+        //if (throttle >= 1024 || pwm >= 1024 || rpm >= 200000 || escRxBuffer[11] & 0xF0 ||\
+        //        escRxBuffer[13] & 0xF0 || escRxBuffer[15] & 0xF0 || escRxBuffer[17] & 0xF0 || escRxBuffer[1] == 0x9B)
+        //        // escRxBuffer[1] == 0x9B added by mstrens to perhaps avoid info frame; in principe LEN is different and so should already be omitted
+        //{
+        //}
+        //else 
+        //{
+            if (config.pinRpm == 255) { // when rpm pin is defined, we discard rpm from esc
+                sent2Core0( RPM,  (int32_t) ((float) rpm  *10 * config.rpmMultiplicator)) ; //Multiplicator should be 2/number of poles
+            }
+            // original formule = raw_voltage*(V_REF/ADC_RES)*V_DIV
+            //                  =            * 3300 /4096 * V_DIV with V_DIV = e.g. 12
+            if (config.pinVolt[0] == 255) { // when volt1 is defined, we discard voltage from esc
+                sent2Core0( MVOLT, (int32_t)  (( float) voltage *100.0 * config.scaleVolt1)) ; 
+            }
+            if (config.pinVolt[1] == 255) { 
+                float currentf = 0;
+                currentf = ((float)current) * 100.0 * config.scaleVolt2 - config.offset2;
+                if (currentf<0) currentf = 0;
+                if (currentf < ESC_MAX_CURRENT) { // discard when current is to high
+                    sent2Core0( CURRENT, (int32_t)  currentf) ; 
+                    // calculate consumption
+                    float interval = (float) (microsRp() - lastEscConsumedMicros);
+                    if ((interval >0 ) && (interval < 800000)) {
+                        escConsumedMah += currentf * interval / 3600000000.0 ;  // in mah.
+                        sent2Core0( CAPACITY, (int32_t) escConsumedMah);
+                    }    
+                    lastEscConsumedMicros =  microsRp(); 
+                }
+            }        
+            if ((config.pinVolt[2] == 255) or ((config.temperature != 1)  and (config.temperature != 2))){ //  we discard temp from esc
+                sent2Core0( TEMP1, tempFet) ;
+            }
+            if ((config.pinVolt[3] == 255) or (config.temperature != 2)){ //  we discard temp from esc
+                if (tempBec != 255) {
+                    sent2Core0( TEMP2, tempBec) ;
+                }    
+            }
+            
+            //printf("Esc throttle=%i   pwm=%i   Volt=%i  current=%i  consumed=%i  temp1=%i  temp2=%i\n", throttle , pwm , voltage , (int) current, (int) escConsumedMah , (int) tempFet , (int) tempBec );
+            
+            //throttle += ALPHA*(update_throttle(raw_throttle)-throttle);
+            //rpm += ALPHA*(update_rpm(raw_rpm)-rpm);
+            //pwm += ALPHA*(update_pwm(raw_pwm)-pwm);
+            //voltage += ALPHA*(update_voltage(raw_voltage)-voltage);
+            //current += ALPHA*(update_current(raw_current)-current);
+            //temperature += ALPHA*(update_temperature(raw_temperature)-temperature);
+        //} 
+    }
+}
 
 void processKontronikFrame(){
     if (escRxBuffer[0] == 0x4B && escRxBuffer[1] == 0x4F && escRxBuffer[2] == 0x44 && escRxBuffer[3] == 0x4C) {
@@ -403,7 +625,7 @@ void processKontronikFrame(){
         int32_t tempBec = escRxBuffer[27];
         
         if (config.pinRpm == 255) { // when rpm pin is defined, we discard rpm from esc
-            sent2Core0( RPM,  (int32_t) ((float) rpm  * config.rpmMultiplicator / 60 )) ; // 60 because we convert from t/min in HZ
+            sent2Core0( RPM,  (int32_t) ((float) rpm  * config.rpmMultiplicator  )) ; // rpm
         }
         if (config.pinVolt[0] == 255) { // when volt1 is defined, we discard voltage from esc    
             sent2Core0( MVOLT, (int32_t)  (( float) voltage * config.scaleVolt1)) ; 
@@ -428,26 +650,23 @@ void processKontronikFrame(){
 
 void processZTW1Frame(){
     if (escRxBuffer[0] == 0xDD && escRxBuffer[1] == 0x01 && escRxBuffer[2] == 0x20 ) {
-        uint32_t rpm = ((uint32_t)escRxBuffer[8]) << 8 | ((uint32_t) escRxBuffer[9]);
         uint32_t voltage = ( ((uint32_t)escRxBuffer[3] << 8) | ((uint32_t) escRxBuffer[4]) ) * 100;  // convert 0.1V to mv
-        float currentf =   ( (uint32_t)escRxBuffer[5] << 8)  | ((uint32_t) escRxBuffer[10] ) * 100;  // convert from 0.1A to ma 
-        //float current_bec = ((uint16_t)escRxBuffer[19] << 8 | escRxBuffer[18]) / 1000.0;
-        //float voltage_bec = ((uint16_t)escRxBuffer[21] << 8 | escRxBuffer[20]) / 1000.0;
-        int32_t tempFet = escRxBuffer[10] - 96;  // probably an offset of 96 to get a range -96/150
-        int32_t tempBec = escRxBuffer[21] - 96;  // probably an offset of 96 to get a range -96/150
+        float currentf =   ( (uint32_t)escRxBuffer[5] << 8)  | ((uint32_t) escRxBuffer[6] ) * 100;  // convert from 0.1A to ma 
+        // byte 7 = throttle ; not used here 
+        uint32_t rpm = ((uint32_t)escRxBuffer[8]) << 8 | ((uint32_t) escRxBuffer[9]);
+        int32_t tempFet = ((int) escRxBuffer[10]) ;  // It seems that at least when positieve, the value is in degree. I do not understand why the doc refers to a range -96/150
+        int32_t tempBec = ((int) escRxBuffer[11]) ;  // 
+        // bytes 2/14 not used here 
+        uint32_t consumed = ( ((uint32_t)escRxBuffer[15] << 8) | ((uint32_t) escRxBuffer[16]) ); // unit = ???
         if (config.pinRpm == 255) { // when rpm pin is defined, we discard rpm from esc
-            sent2Core0( RPM,  (int32_t) ((float) rpm  * config.rpmMultiplicator / 60 )) ; // 60 because we convert from t/min in HZ
+            sent2Core0( RPM,  (int32_t) ((float) rpm  * config.rpmMultiplicator )) ; // rpm
         }
         if (config.pinVolt[0] == 255) { // when volt1 is defined, we discard voltage from esc    
             sent2Core0( MVOLT, (int32_t)  (( float) voltage * config.scaleVolt1 - config.offset1)) ; 
         }
         if (config.pinVolt[1] == 255) {
             sent2Core0( CURRENT, (int32_t) ( currentf * config.scaleVolt2 - config.offset2 ) ) ; 
-            if (lastEscConsumedMicros) { 
-                escConsumedMah += (currentf * (microsRp() - lastEscConsumedMicros)) / 3600000000.0 ;  // in mah.
-                sent2Core0( CAPACITY, (int32_t) escConsumedMah);
-            }
-            lastEscConsumedMicros =  microsRp(); 
+            sent2Core0( CAPACITY, (int32_t) consumed);
         }
         if ((config.pinVolt[2] == 255) or ((config.temperature != 1)  and (config.temperature != 2))){ //  we discard temp from esc    
             sent2Core0( TEMP1, tempFet) ;
@@ -455,7 +674,7 @@ void processZTW1Frame(){
         if ((config.pinVolt[3] == 255) or (config.temperature != 2)){ //  we discard temp from esc
             sent2Core0( TEMP2, tempBec) ;
         }
-        printf("Esc Volt=%i   current=%i  consumed=%i  temp1=%i  temp2=%i\n", voltage , (int) currentf, (int) escConsumedMah , (int) tempFet , (int) tempBec );
+        //printf("Esc Volt=%i   current=%i  consumed=%i  temp1=%i  temp2=%i\n", voltage , (int) currentf, (int) consumed , (int) tempFet , (int) tempBec );
     }    
 }
 
@@ -484,8 +703,8 @@ void processBlhFrame(){
         for (uint8_t i = 0; i<10 ; i++) {
             printf(" %x", escRxBuffer[i]);
         }
-        #endif
         printf("\n");
+        #endif
         return;    
     }
     #ifdef DEBUB_BLHELI
@@ -513,7 +732,7 @@ void processBlhFrame(){
         sent2Core0( CAPACITY, consumption);
     }
     if (config.pinRpm == 255) { // when rpm pin is defined, we discard rpm from esc
-            sent2Core0( RPM,  (int32_t) ( ((float) rpm)  * config.rpmMultiplicator * 100.0 / 60.0 )) ; // 0.60 because we convert from 100t/min in HZ     
+            sent2Core0( RPM,  (int32_t) ( ((float) rpm)  * config.rpmMultiplicator * 100.0  )) ; // * 100  because we convert to rpm     
     }
     //printf("Esc Volt=%i   current=%i  consumed=%i  temp1=%i   rpm=%i\n", voltage , (int) currentf, consumption , temp  , rpm);
 

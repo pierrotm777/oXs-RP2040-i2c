@@ -56,7 +56,7 @@ struct CONFIG{
     uint8_t CamPitchChannel;
     uint8_t CamRollChannel;
     uint8_t CamPitchRatio;
-    uint8_t CamRollRatio; 					  
+    uint8_t CamRollRatio; 			
     //                for gyro
     uint8_t gyroChanControl ; // Rc channel used to say if gyro is implemented or not and to select the mode and the general gain. Value must be in range 1/16 or 255 (no gyro)
     uint8_t gyroChan[3] ;    // Rc channel used to transmit original Ail, Elv, Rud stick position ; Value must be in range 1/16 when gyroControlChannel is not 255
@@ -67,7 +67,7 @@ struct CONFIG{
     
     int8_t vr_gain[3];          // store the gain per axis (to combine with global gain provided by gyroChanControl)
     enum STICK_GAIN_THROW stick_gain_throw;  // this parameter allows to limit the compensation on a part of the stick travel (gain decreases more or less rapidly with stick offset)
-    enum MAX_ROTATE max_rotate;
+    enum MAX_ROTATE max_rotate;              // this parameter varies from 1 up to 4 and is used to increase/decrease the gyro corrections (*2,*4,*8,*16)
     enum RATE_MODE_STICK_ROTATE rate_mode_stick_rotate;
     bool gyroAutolevel;           // true means that stabilize mode replies the Hold mode (on switch position)
     uint8_t mpuOrientationH;       // define the orientation of the mpu when plane is horizontal;
@@ -77,10 +77,24 @@ struct CONFIG{
     uint8_t pinSpiSck;
     uint8_t pinSpiMosi;
     uint8_t pinSpiMiso;
+    float accOffX ;
+    float accOffY ;
+    float accOffZ ;
+    float accScaleXX ;
+    float accScaleYY ;
+    float accScaleZZ ;
+    float accScaleXY ;
+    float accScaleXZ ;
+    float accScaleYZ ;
+    uint8_t pinHigh ;
+    uint8_t pinLow ;
+    uint8_t pinE220Busy;
 };
 
 void handleUSBCmd(void);
 void processCmd(void);
+int8_t handleOneCmd( char * bufferPos);  // handle one command with buffer starting at bufferPos up to a 0X00
+
 
 char * skipWhiteSpace(char * str);
 void removeTrailingWhiteSpace( char * str);
@@ -97,6 +111,9 @@ void requestMpuCalibration();
 void printConfigOffsets();
 void printFieldValues();
 void printPwmValues();
+
+void dumpConfig();
+void fillConfigWithDefault();
 
 // for sequencer
 #define SEQUENCER_VERSION 4
@@ -179,13 +196,28 @@ void printGyro();
 void printGyroMixer();
 
 bool getPid(uint8_t mode);  // get all pid parameters for one mode; return true if valid; config is then updated
+bool getAccParam();
 
+void printDebugHelp();
+void printDebugFlags();
 
 #define HW4 4
 #define HW3 3
+#define HW5 7
 #define KONTRONIK 2
 #define ZTW1 1
 #define BLH 5
+#define JETI_ESC 6
 
-#define REQUEST_HORIZONTAL_MPU_CALIB 0X01
-#define REQUEST_VERTICAL_MPU_CALIB 0X02
+#define REQUEST_USB_HORIZONTAL_MPU_CALIB 0X01 // send from core0 to core 1
+#define REQUEST_USB_VERTICAL_MPU_CALIB 0X02   // send from core0 to core 1
+#define REQUEST_NEXT_ACC_CALIB 0X03       // send from core0 to core 1 
+#define REQUEST_HORIZONTAL_MPU_ORIENTATION 0X04 // send from core0 to core 1; there is a reply from core1 when done
+#define REQUEST_VERTICAL_MPU_ORIENTATION 0X05   // send from core0 to core 1; there is a reply from core1 when done
+#define REQUEST_GYRO_CALIBRATION 0X06       // send from core0 to core 1
+
+enum DEBUG_LIST : uint8_t {
+    DEBUG_LORA,
+    DEBUG_ESC,
+    DEBUG_MAX_NUMBER,
+    };

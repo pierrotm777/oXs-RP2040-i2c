@@ -2,7 +2,8 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/irq.h"
-
+#include "hardware/sync.h"  // save_and_disable_interrupts / restore_interrupts
+#include <string.h>
 #include "tools.h"
 #include "config.h"
 #include "param.h"
@@ -10,64 +11,117 @@
 #include "ads1115.h"
 #include "rpm.h"
 #include "gps.h"
-#include "tools.h"
 #include "i2c_slave.h"
 #include "rlink.h"
 
 
 extern CONFIG config;
 STREAM_DATA streamData;
-bool packetRlinkSet = false;
 
 extern uint8_t debugTlm;
 extern field fields[];  // list of all telemetry fields that are measured
-uint32_t nowMs=millisRp();
-static void i2c_handler();
+uint32_t nowMs = millisRp();
 
-void setupRlink(){
- 
-    if ( config.pinPrimIn == 255 || config.pinTlm == 255 || config.protocol != 'R') return; // skip if pins are not defined and if protocol is not RadioLink  
-    i2c_init( i2c0, 400 * 1000);
-    
+// Deux trames preparees hors interruption, comme Wire.write(buffer, 16).
+static uint8_t rlinkFrame1[16];  // 0x89, 0xAB
+static uint8_t rlinkFrame2[16];  // 0x89, 0xCD
+
+// Le code Arduino commence par set2(), puis set1().
+static bool packetRlinkSet = false;
+static bool rlinkReadInProgress = false;
+static uint8_t rlinkTxFrame[16]; // copie figee pendant UNE lecture du maitre
+static uint8_t rlinkBytePos = 0;
+static volatile uint32_t rlinkRequestCount = 0;
+static volatile uint32_t rlinkCompleteCount = 0;
+static volatile uint32_t rlinkPartialCount = 0;
+
+// handleRlink() et setupRlink() tournent sur le coeur 0 : l'IRQ I2C0
+// est installee sur ce meme coeur. Evite une trame partiellement actualisee.
+static void publishRlinkFrame(uint8_t destination[16], const uint8_t source[16])
+{
+    uint32_t irqState = save_and_disable_interrupts();
+    memcpy(destination, source, 16);
+    restore_interrupts(irqState);
+}
+
+void setupRlink()
+{
+    if (config.pinPrimIn == 255 || config.pinTlm == 255 || config.protocol != 'R') return;
+
+    // PRI = SCL0 (1/5/9/13), TLM = SDA0 (0/4/8/12).
+    // Ce test empeche d'activer l'I2C sur une paire de broches erronee.
+    if (config.pinPrimIn != config.pinTlm + 1) {
+        printf("RadioLink: PRI (SCL0) must be TLM (SDA0) + 1\n");
+        return;
+    }
+
+    set1();
+    set2();
+    packetRlinkSet = false;
+    rlinkReadInProgress = false;
+    rlinkBytePos = 0;
+
+    i2c_init(i2c0, 400 * 1000);
     gpio_set_function(config.pinPrimIn, GPIO_FUNC_I2C);
-	gpio_pull_up(config.pinPrimIn);
+    gpio_pull_up(config.pinPrimIn);
     gpio_set_function(config.pinTlm, GPIO_FUNC_I2C);
     gpio_pull_up(config.pinTlm);
 
     i2c_slave_init(i2c0, RLINK_I2C_ADDRESS, &i2c_rlink_handler);
-
+    printf("RadioLink: I2C0 slave 0x%02X, SDA=GP%u, SCL=GP%u\n",
+           (unsigned int)RLINK_I2C_ADDRESS,
+           (unsigned int)config.pinTlm, (unsigned int)config.pinPrimIn);
 }
 
+// Appele depuis I2C_SLAVE_REQUEST, donc dans l'interruption I2C.
+// UN octet par demande RD_REQ : on n'attend jamais dans l'IRQ.
 void runRlinkRequest()
 {
-    if (packetRlinkSet) 
+    if (!rlinkReadInProgress)
     {
-        packetRlinkSet = false;
-        set1();
-    } 
-    else 
-    {
-        packetRlinkSet = true;
-        set2();
+        // Figer les 16 octets pour eviter de melanger deux mises a jour.
+        memcpy(rlinkTxFrame, packetRlinkSet ? rlinkFrame1 : rlinkFrame2, 16);
+        rlinkBytePos = 0;
+        rlinkReadInProgress = true;
+        ++rlinkRequestCount;
     }
+
+    // Si le maitre lit plus de 16 octets, repondre sans le bloquer.
+    const uint8_t value = (rlinkBytePos < 16) ? rlinkTxFrame[rlinkBytePos++] : 0x00;
+    i2c_write_byte_raw(i2c0, value);
 }
 
-void i2c_rlink_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
-    switch (event) 
+void i2c_rlink_handler(i2c_inst_t *i2c, i2c_slave_event_t event)
+{
+    switch (event)
     {
-        case I2C_SLAVE_RECEIVE: // master has written some data
-            //not used here
+        case I2C_SLAVE_RECEIVE:
+            // Vider les ecritures eventuelles du maitre.
+            while (i2c_get_read_available(i2c) > 0)
+            {
+                (void)i2c_read_byte_raw(i2c);
+            }
             break;
-        case I2C_SLAVE_REQUEST: // master is requesting data
+
+        case I2C_SLAVE_REQUEST:
             runRlinkRequest();
             break;
-        case I2C_SLAVE_FINISH: // master has signalled Stop / Restart
-            //not used here
+
+        case I2C_SLAVE_FINISH:
+            if (rlinkReadInProgress)
+            {
+                // Une alternance par transaction, pas par octet.
+                if (rlinkBytePos >= 16) ++rlinkCompleteCount;
+                else ++rlinkPartialCount;
+                packetRlinkSet = !packetRlinkSet;
+                rlinkReadInProgress = false;
+                rlinkBytePos = 0;
+            }
             break;
+
         default:
             break;
     }
-
 }
 
 void handleRlink()
@@ -127,7 +181,7 @@ void handleRlink()
     if (fields[PITCH].available) 
     {
         //streamData.pitch = (int) fields[PITCH].value;
-        streamData.roll =  (fields[PITCH].value * 175) / 100  ; //roll V11
+        streamData.pitch =  (fields[PITCH].value * 175) / 100  ; //pitch V11
     }
     if (fields[ROLL].available) 
     {
@@ -144,23 +198,31 @@ void handleRlink()
     //}
 
 
+    // Preparer les trames hors interruption I2C (ne pas calculer dans le callback).
+    set1();
+    set2();
+
     if (debugTlm == 'Y')
     {
         if(millisRp()-nowMs>=2000)
         {
           
-            printf("RadioLink Structure:\n");//https://koor.fr/C/cstdio/fprintf.wp
-            printf("Nb Sats = %d\n" , (uint8_t)streamData.gps_sats);
-            printf("VSpeed = %lu\n" , (ulong)streamData.climb);
-            printf("Altitude = %.1f\n" , (float)streamData.altitude);
-            printf("GSpeed = %lu\n" , (ulong)streamData.gps_speed);
-            printf("Pitch = %.2f\n" , (float)streamData.pitch);
-            printf("Roll = %.2f\n" , (float)streamData.roll);
-            printf("Yaw = %.2f\n" , (float)streamData.yaw);
-            printf("Lon = %.7f\n" , (float)streamData.gps_lon/10000000);
-            printf("Lat = %.7f\n" , (float)streamData.gps_lat/10000000);
-            printf("Distance = %lu\n" , (float)streamData.home_distance);
-            printf("V1 = %.2f\n\n" , (float)streamData.battVoltage);
+            printf("RadioLink Structure:\n");
+            printf("I2C reads=%lu full=%lu partial=%lu\n",
+                   (unsigned long)rlinkRequestCount,
+                   (unsigned long)rlinkCompleteCount,
+                   (unsigned long)rlinkPartialCount);
+            printf("Nb Sats = %u\n", (unsigned int)streamData.gps_sats);
+            printf("VSpeed = %d\n", streamData.climb);
+            printf("Altitude = %.1f\n", streamData.altitude);
+            printf("GSpeed = %.2f\n", streamData.gps_speed);
+            printf("Pitch = %.2f\n", streamData.pitch);
+            printf("Roll = %.2f\n", streamData.roll);
+            printf("Yaw = %.2f\n", streamData.yaw);
+            printf("Lon = %.7f\n", streamData.gps_lon / 10000000.0);
+            printf("Lat = %.7f\n", streamData.gps_lat / 10000000.0);
+            printf("Distance = %.1f\n", streamData.home_distance);
+            printf("V1 = %.2f\n\n", streamData.battVoltage);
           
             nowMs=millisRp(); /* Restart the Chrono for the printf */
         }
@@ -208,7 +270,7 @@ void set1() {
                       distanceHi, distanceLo, 
                       0x00};//v11
 				  
-  i2c_write_blocking(i2c0, RLINK_I2C_ADDRESS, bufferRlink, 16, false);
+  publishRlinkFrame(rlinkFrame1, bufferRlink);
 }
 
 void set2() {
@@ -233,22 +295,9 @@ void set2() {
                       sat, 
                       riseHi, riseLo, 
                       voltesHi, voltesLo,
-                      latit.b[3], latit.b[2], latit.b[1] , latit.b[0],
-                      longt.b[3], longt.b[2], longt.b[1] , longt.b[0],
+                      longt.b[3], longt.b[2], longt.b[1] , longt.b[0], // longitude d’abord
+                      latit.b[3], latit.b[2], latit.b[1] , latit.b[0], // latitude ensuite
                       0x00};//v11
 
-//   int32_t lat = streamData.gps_lat;
-//   uint8_t latHHi = uint8_t((lat >> 24) & 0x000000FF);
-//   uint8_t latHi  = uint8_t((lat >> 16) & 0x000000FF);
-//   uint8_t latLo  = uint8_t((lat >> 8)  & 0x000000FF);
-//   uint8_t latLLi = uint8_t((lat >> 0)  & 0x000000FF);
-
-//   int32_t lon = streamData.gps_lon;
-//   uint8_t lonHHi = uint8_t((lon >> 24) & 0x000000FF);
-//   uint8_t lonHi  = uint8_t((lon >> 16) & 0x000000FF);
-//   uint8_t lonLo  = uint8_t((lon >> 8)  & 0x000000FF);
-//   uint8_t lonLLi = uint8_t((lon >> 0)  & 0x000000FF);
-
-//uint8_t bufferRlink[16] = {0x89, 0xCD, streamData.gps_sats, riseHi, riseLo, voltesHi, voltesLo, latHHi, latHi, latLo , latLLi, lonHHi, lonHi, lonLo , lonLLi, 0x00};
-  i2c_write_blocking(i2c0, RLINK_I2C_ADDRESS, bufferRlink, 16, false);
+  publishRlinkFrame(rlinkFrame2, bufferRlink);
 }

@@ -197,14 +197,14 @@ void calculateAirspeed(){
 //              }
 
 int32_t posFieldValues[] = {    
-    891234567L, //  LATITUDE ,  //  GPS special format
-    1781234567L, //  LONGITUDE =     //  GPS special format
+    488566000L,  // LATITUDE  Paris 48.8566 N
+    23522000L,   // LONGITUDE Paris  2.3522 E
     2468,        //GROUNDSPEED =  //  GPS cm/s
     17912,      //  HEADING =,      //  GPS 0.01 degree
     135721,     //  ALTITUDE ,    //  GPS cm
     23,         //  NUMSAT ,      //  5 GPS no unit   
-    0X170410FF,  //  GPS_DATE ,    // GPS special format AAMMJJFF
-    0X22133100,  //  GPS_TIME ,    // GPS special format HHMMSS00
+    0X180410FF,  //  GPS_DATE ,    // GPS special format AAMMJJFF = value for 24 04 16
+    0X160D1F00,  //  GPS_TIME ,    // GPS special format HHMMSS00 = value for 22:13:31
     123,         //  GPS_PDOP ,    // GPS no unit
     179,         //  GPS_HOME_BEARING, // GPS degree
 
@@ -253,14 +253,14 @@ int32_t posFieldValues[] = {
 };
 
 int32_t negFieldValues[] = {    
-    -891234567L, //  LATITUDE ,  //  GPS special format
-    -1781234567L, //  LONGITUDE =     //  GPS special format
+    -346037000L,  // LATITUDE  Buenos Aires -34.6037 S
+    -583816000L,  // LONGITUDE Buenos Aires -58.3816 W
     0,        //GROUNDSPEED =  //  GPS cm/s
     -17912,      //  HEADING =,      //  GPS 0.01 degree
     -56721,     //  ALTITUDE ,    //  GPS cm
     0,         //  NUMSAT ,      //  5 GPS no unit   
-    0X170410FF,  //  GPS_DATE ,    // GPS special format AAMMJJFF
-    0X22133100,  //  GPS_TIME ,    // GPS special format HHMMSS00
+    0X180410FF,  //  GPS_DATE ,    // GPS special format AAMMJJFF = value for 24 04 16
+    0X160D1F00,  //  GPS_TIME ,    // GPS special format HHMMSS00 = value for 22:13:31
     03,         //  GPS_PDOP ,    // GPS no unit
     -179,         //  GPS_HOME_BEARING, // GPS degree
 
@@ -308,16 +308,14 @@ int32_t negFieldValues[] = {
         
 };
 // fill all fields with dummy values (useful to test a protocol)
- void fillFields( uint8_t forcedFields){
-    //printf("entering fillFields wi,th %d\n", forcedFields);
+void fillFields( uint8_t forcedFields){
+    // FVP: force all fields, just as FVN does. Reapplied from main.cpp
+    // while simulation is active; in particular V3/V4 cannot overwrite TEMP1/TEMP2.
     if (forcedFields == 1)  {   // force positive values
-        for (uint8_t i = 0; i <  (sizeof(posFieldValues)/sizeof(*posFieldValues)) ; i++){
-        //for (uint8_t i = 0; i <  6 ; i++){
-        
+        for (uint8_t i = 0; i < (sizeof(posFieldValues)/sizeof(*posFieldValues)); i++){
             fields[i].value = posFieldValues[i];
             fields[i].available = true;
             fields[i].onceAvailable = true;
-            //printf("filling for %d\n", i);
         }
     }
     if (forcedFields == 2)  {   // force negative values
@@ -327,7 +325,7 @@ int32_t negFieldValues[] = {
             fields[i].onceAvailable = true; 
         }
     }
- }
+}
 
 uint16_t swapBinary(uint16_t value) {
     return (value >> 8) | (value << 8);
