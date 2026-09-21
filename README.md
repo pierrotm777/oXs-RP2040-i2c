@@ -186,7 +186,6 @@ Note: pin 16 is reserved for an internal LED on RP2040-zero or RP2040-TINY and s
 |SBUS_OUT = 0/29           |Sbus output|  
 |TLM = 0/29                |telemetry data (! for futaba Sbus2, this pin must be equal to PRI pin - 1)|  
 |V1= 26/29 ... V4= 26/29 |voltage (or current/temperatue) measurements |  
-
 |RPM = 0/29                     | RPM|
 |LED = 16                       | internal led of RP2040-zero or RP2040-TINY|  
 |LOG = 0/29                     | data to be logged |  
@@ -199,6 +198,10 @@ Note: pin 16 is reserved for an internal LED on RP2040-zero or RP2040-TINY and s
 |HIGH = 0/29                    | set the voltage level to 3V; can be used as Vcc for some sensors|
 |LOW = 0/29                     | set the voltage level to 0V; can be used as Ground for some sensors|
 
+|Command|used for:|
+|----|----|
+|PRI = 1, 5, 9, 13 |for SCL0|
+|TLM = 0, 4, 8, 12 |for SDA0|
 
 ## --------- Software -------------------
 This software has been developped using the RP2040 SDK provided by Rapsberry.
