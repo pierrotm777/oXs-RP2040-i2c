@@ -198,6 +198,7 @@ Note: pin 16 is reserved for an internal LED on RP2040-zero or RP2040-TINY and s
 |HIGH = 0/29                    | set the voltage level to 3V; can be used as Vcc for some sensors|
 |LOW = 0/29                     | set the voltage level to 0V; can be used as Ground for some sensors|
 
+**I2C ONLY**
 |Command|used for:|
 |----|----|
 |PRI = 1, 5, 9, 13 |for SCL0|
