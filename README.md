@@ -197,6 +197,8 @@ Note: pin 16 is reserved for an internal LED on RP2040-zero or RP2040-TINY and s
 |SPI_BUSY = 0/29                | Busy pin from E220-900M22S  (locator)|
 |HIGH = 0/29                    | set the voltage level to 3V; can be used as Vcc for some sensors|
 |LOW = 0/29                     | set the voltage level to 0V; can be used as Ground for some sensors|
+|SDA = 2, 6, 10, 14, 18, 22, 26 | baro sensor, gyro, ads1115, ...|
+|SCL = 3, 7, 11, 15, 19, 23, 27 | baro sensor, gyro, ads1115, ...|
 
 **I2C ONLY**
 |Command|used for:|
