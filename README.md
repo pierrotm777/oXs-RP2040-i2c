@@ -14,9 +14,9 @@ Primary channels input    =    9  (PRI     = 1, 5, **9**, 13 (for SCL0) )
 Telemetry . . . . . . . . =    8  (TLM     = 0, 4, **8**, 12 (for SDA0) )
 ```
 > [!NOTE]  
-This PCB use:
-TLM = 8
-PRI = 9
+This PCB use:  
+TLM = 8  
+PRI = 9  
 
 ## For rc protocols : expressLRS / FRSKY (sport + Fbus) / HOTT / JETI Ex / JETI EXBUS/ MPX / FLYSKY / Futaba (SBUS2) / Spektrum (SRXL2) / Spektrum (XBUS) / Radiolink / Hitec
 
