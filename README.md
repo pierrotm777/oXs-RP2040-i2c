@@ -15,8 +15,23 @@ Telemetry . . . . . . . . =    8  (TLM     = 0, 4, **8**, 12 (for SDA0) )
 ```
 > [!NOTE]  
 This PCB use:  
-TLM = 8  
-PRI = 9  
+Version = 3.0.11 & I2C  
+    Function                GPIO  Change entering XXX=yyy (yyy=255 to disable)  
+Primary channels input    =    9  (PRI     = 1, 5, 9, 13 (for SCL0) )  
+Secondary channels input  =  255  (SEC     = 1, 13, 17, 29)  
+Telemetry . . . . . . . . =    8  (TLM     = 0, 4, 8, 12 (for SDA0) )  
+GPS Rx  . . . . . . . . . =   13  (GPS_RX  = 0, 1, 2, ..., 29)  
+GPS Tx  . . . . . . . . . =   12  (GPS_TX  = 0, 1, 2, ..., 29)  
+Sbus OUT  . . . . . . . . =  255  (SBUS_OUT= 0, 1, 2, ..., 29)  
+RPM   . . . . . . . . . . =   15  (RPM     = 0, 1, 2, ..., 29)  
+SDA (I2C sensors) . . . . =   10  (SDA     = 2, 6, 10, 14, 18, 22, 26)  
+SCL (I2C sensors) . . . . =   11  (SCL     = 3, 7, 11, 15, 19, 23, 27)  
+PWM Channels 1, 2, 3 ,4   =  255  255  255  255 (C1 / C16= 0, 1, 2, ..., 15)  
+PWM Channels 5, 6, 7 ,8   =  255  255  255  255  
+PWM Channels 9,10,11,12   =  255  255  255  255  
+PWM Channels 13,14,15,16  =  255  255  255  255  
+Voltage 1, 2, 3, 4        =   26   27   28   29 (V1 / V4 = 26, 27, 28, 29)  
+RGB led . . . . . . . . . =   16  (RGB    = 0, 1, 2, ..., 29)  
 
 ## For rc protocols : expressLRS / FRSKY (sport + Fbus) / HOTT / JETI Ex / JETI EXBUS/ MPX / FLYSKY / Futaba (SBUS2) / Spektrum (SRXL2) / Spektrum (XBUS) / Radiolink / Hitec
 
