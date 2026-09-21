@@ -1,5 +1,19 @@
 # openXsensor (oXs) on RP2040 board
 This oXs version is a fork from the [oXs RP2040 project by mstrens](https://github.com/mstrens/oXs_on_RP2040/tree/test)
+My [last PCB v1.2](https://github.com/pierrotm777/oXs_RP2040_Gps_Baro_Acc_Gyro/tree/main/V1.2) can use this new version.  
+![](oXsRP2040Full_I2C.jpg)  
+```text
+Rf protocol                 PROTOCOL= Y        Y is S(Sport Frsky), F(Fbus Frsky), B(HUB Frsky), C(CRSF/ELRS), H(Hott), M(Mpx)
+                                               2(Sbus2 Futaba), J(Jeti), E(jeti Exbus), L (spektrum SRXL2) ,or I(IBus/Flysky)
+                                               R(Rlink), T(Hitec), X(Xbus)
+```											   
+```text
+Version = 3.0.11 & I2C 
+    Function                GPIO  Change entering XXX=yyy (yyy=255 to disable)
+Primary channels input    =    9  (PRI     = 1, 5, 9, 13 (for SCL0) )
+Secondary channels input  =  255  (SEC     = 1, 13, 17, 29)
+Telemetry . . . . . . . . =    8  (TLM     = 0, 4, 8, 12 (for SDA0) )
+```
 
 ## For rc protocols : expressLRS / FRSKY (sport + Fbus) / HOTT / JETI Ex / JETI EXBUS/ MPX / FLYSKY / Futaba (SBUS2) / Spektrum (SRXL2) / Spektrum (XBUS) / Radiolink / Hitec
 
