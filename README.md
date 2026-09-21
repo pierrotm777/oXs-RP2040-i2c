@@ -1,7 +1,9 @@
 # openXsensor (oXs) on RP2040 board
-## For rc protocols : expressLRS / FRSKY (sport + Fbus) / HOTT / JETI Ex / JETI EXBUS/ MPX / FLYSKY / Futaba (SBUS2) / Spektrum (SRXL2) 
+This oXs version is a fork from the [oXs RP2040 project by mstrens](https://github.com/mstrens/oXs_on_RP2040/tree/test)
 
-This project can be interfaced with 1 or 2 ELRS, FRSKY , HOTT , MPX, FLYSKY , Futaba, Spektrum or Jeti receiver(s) (protocol has to be selected accordingly).
+## For rc protocols : expressLRS / FRSKY (sport + Fbus) / HOTT / JETI Ex / JETI EXBUS/ MPX / FLYSKY / Futaba (SBUS2) / Spektrum (SRXL2) / Spektrum (XBUS) / Radiolink / Hitec
+
+This project can be interfaced with 1 or 2 ELRS, FRSKY , HOTT , MPX, FLYSKY , Futaba, Spektrum(Srxl2), Jeti receiver(s), Radiolink, Spektrum(Xbus), Hitec (protocol has to be selected accordingly).
  
 ### This project is foreseen to generate:
 - telemetry data (e.g. when a flight controller is not used)
@@ -52,9 +54,6 @@ Each function (telemetry/PWM/SBUS/gyro/logger/sequencer/localisation) can be use
 
 
 Note: when a mpu6050 is used (to improve vario reactivity, stabilize the plane and/or a camera), it is important to calibrate the mp6050 horizontally and vertically (see section below)
-
-[![](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/donate/?hosted_button_id=4T3KNNJ58J3B4)
-
 
 ## -------  Hardware -----------------
 
@@ -115,6 +114,9 @@ Depending on the protocol, the pins used for PRIMARY/SECONDARY RC Channels and f
 | I(Flysky Ibus) |    (Sbus from Rx1)         |     (Sbus from Rx2)     | ( Ibus from RX1 or Rx2)|   (1)  |
 | L(Spektrum Srxl2)|  Srxl from Rx1           |     Not used            | Not used               |   (2)  |
 | 2(Futaba Sbus2) |   Sbus2 from Rx1          |     (Sbus2 from Rx2)    | Sbus2 from Rx1 via 1Kohm | (3)  |
+| T(Hitec)       |    I2C SCL (pullup 1k to 3.3v|  Not used            | I2C SDA (pullup 1k to 3.3v)|      |
+| R(Radiolink)   |    I2C SCL (pullup 1k to 3.3v|  Not used            | I2C SDA (pullup 1k to 3.3v)|  (4) |
+| X(Spektrum Xbus)   |    I2C SCL (no pullup needed)|  Not used         | I2C SDA (no pullup needed)|     |
 
 Note: pins between () means that they are optional.
 
@@ -124,6 +126,7 @@ Note: pins between () means that they are optional.
 
 (3) For Futaba, TLM pin must be equal to PRI pin - 1 and insert 1 kOhm resistor between PRI and TLM
 
+(4) Radiolink isn't actually tested, try in first without pullup.
 
 Up to 16 PWM signals can be generated on pin gpio 0...15 (to select in setup parameters). 
 
