@@ -11,7 +11,6 @@ Rf protocol                 PROTOCOL= Y        Y is S(Sport Frsky), F(Fbus Frsky
 Version = 3.0.11 & I2C 
     Function                GPIO  Change entering XXX=yyy (yyy=255 to disable)
 Primary channels input    =    9  (PRI     = 1, 5, 9, 13 (for SCL0) )
-Secondary channels input  =  255  (SEC     = 1, 13, 17, 29)
 Telemetry . . . . . . . . =    8  (TLM     = 0, 4, 8, 12 (for SDA0) )
 ```
 
