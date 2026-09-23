@@ -206,24 +206,22 @@ void handleRlink()
     {
         if(millisRp()-nowMs>=2000)
         {
-          
-            printf("RadioLink Structure:\n");
-            printf("I2C reads=%lu full=%lu partial=%lu\n",
+            printf("[RLINK] I2C reads=%lu full=%lu partial=%lu\n",
                    (unsigned long)rlinkRequestCount,
                    (unsigned long)rlinkCompleteCount,
                    (unsigned long)rlinkPartialCount);
-            printf("Nb Sats = %u\n", (unsigned int)streamData.gps_sats);
-            printf("VSpeed = %d\n", streamData.climb);
-            printf("Altitude = %.1f\n", streamData.altitude);
-            printf("GSpeed = %.2f\n", streamData.gps_speed);
-            printf("Pitch = %.2f\n", streamData.pitch);
-            printf("Roll = %.2f\n", streamData.roll);
-            printf("Yaw = %.2f\n", streamData.yaw);
-            printf("Lon = %.7f\n", streamData.gps_lon / 10000000.0);
-            printf("Lat = %.7f\n", streamData.gps_lat / 10000000.0);
-            printf("Distance = %.1f\n", streamData.home_distance);
-            printf("V1 = %.2f\n\n", streamData.battVoltage);
-          
+            printf("[RLINK] Nb Sats = %u\n", (unsigned int)streamData.gps_sats);
+            printf("[RLINK] VSpeed = %d\n", streamData.climb);
+            printf("[RLINK] Altitude = %.1f\n", streamData.altitude);
+            printf("[RLINK] GSpeed = %.2f\n", streamData.gps_speed);
+            printf("[RLINK] Pitch = %.2f\n", streamData.pitch);
+            printf("[RLINK] Roll = %.2f\n", streamData.roll);
+            printf("[RLINK] Yaw = %.2f\n", streamData.yaw);
+            printf("[RLINK] Lon = %.7f\n", streamData.gps_lon / 10000000.0);
+            printf("[RLINK] Lat = %.7f\n", streamData.gps_lat / 10000000.0);
+            printf("[RLINK] Distance = %.1f\n", streamData.home_distance);
+            printf("[RLINK] V1 = %.2f\n\n", streamData.battVoltage);
+
             nowMs=millisRp(); /* Restart the Chrono for the printf */
         }
     }    

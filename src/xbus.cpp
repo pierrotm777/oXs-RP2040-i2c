@@ -17,31 +17,39 @@
 extern CONFIG config;
 extern field fields[];
 extern uint8_t debugTlm;
+// Filled by oXs core0 from MPU data; mpu.cpp is unchanged.
+extern bool gyroIsInstalled;
+extern int16_t gyroX;
+extern int16_t gyroY;
+extern int16_t gyroZ;
 
 namespace {
 constexpr uint8_t kPacketLength = 16;
 constexpr uint8_t kTxLength = 32;  // safe padding if a master requests extra bytes
 constexpr uint32_t kRefreshMs = 100;
+constexpr uint8_t kSensorCount = 10;
 
 // MSRC i2c_multi consumes the buffer *after* the request callback returns.
 // A static transmit buffer is mandatory (MSRC's uint8_t buffer[16] on the
 // callback stack would have an invalid lifetime).
 uint8_t tx[kTxLength] = {};
-uint8_t published[7][kPacketLength] = {};
-uint32_t requests[7] = {};
+uint8_t published[kSensorCount][kPacketLength] = {};
+uint32_t requests[kSensorCount] = {};
 uint32_t lastUpdate = 0;
 uint32_t lastDebug = 0;
 bool ready = false;
 
-enum SensorIdx : uint8_t { AIR, GPS_LOC, GPS_STAT, ENERGY, ESC, VARIO_IDX, RPM_TEMP };
-constexpr uint8_t ids[7] = {
-    TELE_DEVICE_AIRSPEED, TELE_DEVICE_GPS_LOC, TELE_DEVICE_GPS_STATS,
-    TELE_DEVICE_RX_MAH, TELE_DEVICE_ESC, TELE_DEVICE_VARIO_S,
-    TELE_DEVICE_RPM
+
+enum SensorIdx : uint8_t { AIR, GMETER, GPS_LOC, GPS_STAT, ENERGY, GYRO, ESC, VARIO_IDX, RPM_TEMP, ADS1 };
+constexpr uint8_t ids[kSensorCount] = {
+    TELE_DEVICE_AIRSPEED, TELE_DEVICE_GMETER,
+    TELE_DEVICE_GPS_LOC, TELE_DEVICE_GPS_STATS, TELE_DEVICE_RX_MAH,
+    TELE_DEVICE_GYRO, TELE_DEVICE_ESC, TELE_DEVICE_VARIO_S, TELE_DEVICE_RPM,
+    TELE_DEVICE_USER_16SU // 0x50: four ADS1115 inputs in millivolts
 };
 
 static int8_t indexForAddress(uint8_t addr) {
-    for (uint8_t i = 0; i < 7; ++i) if (ids[i] == addr) return static_cast<int8_t>(i);
+    for (uint8_t i = 0; i < kSensorCount; ++i) if (ids[i] == addr) return static_cast<int8_t>(i);
     return -1;
 }
 static inline bool has(fieldIdx f) { return fields[f].available; }
@@ -64,6 +72,24 @@ static uint32_t bcd(uint32_t v) {
 static uint16_t be16(int32_t v) {
     return swapBinary(static_cast<uint16_t>(v));
 }
+
+static int16_t xbusSigned16(int32_t v) {
+    return static_cast<int16_t>(be16(v));
+}
+static int16_t absolute16(int16_t v) {
+    return v < 0 ? static_cast<int16_t>(-int32_t(v)) : v;
+}
+// oXs ACC_* is in mg, Spektrum G-meter in 0.01 g.
+static int16_t xbusAcc(int32_t mg) {
+    return static_cast<int16_t>(clamped(roundDiv(mg, 10), -4000, 4000));
+}
+// The core0 gyro variable is normalized: 32768 ~= 2000 deg/s.
+// Spektrum gyro is in 0.1 deg/s (32768 -> 20000).
+static int16_t xbusGyro(int16_t raw) {
+    return static_cast<int16_t>(clamped(roundDiv(int64_t(raw) * 625, 1024), -32766, 32766));
+}
+static int16_t maxAccX = 0, maxAccY = 0, maxAccZ = 0, minAccZ = 0;
+static int16_t maxGyroX = 0, maxGyroY = 0, maxGyroZ = 0;
 // oXs lat/lon: degrees * 10^7. SRXL2/X-Bus: packed BCD DDMM.mmmm.
 static uint32_t bcdCoordinate(int32_t input, bool longitude, uint8_t &flags) {
     int64_t absolute = input < 0 ? -int64_t(input) : int64_t(input);
@@ -110,6 +136,33 @@ static void formatAll() {
     air.airspeed = has(AIRSPEED) ? be16(clamped(roundDiv(int64_t(val(AIRSPEED)) * 36, 1000), 0, 65534)) : 0xffff;
     air.maxAirspeed = 0xffff;
     publishStruct(AIR, air);
+
+    STRU_TELE_G_METER gm{};
+    gm.identifier = TELE_DEVICE_GMETER;          // 0x14
+    gm.sID = 0;
+    gm.GForceX = gm.GForceY = gm.GForceZ = static_cast<int16_t>(0x7fff);
+    gm.maxGForceX = gm.maxGForceY = gm.maxGForceZ = gm.minGForceZ = static_cast<int16_t>(0x7fff);
+    if (has(ACC_X)) {
+        const int16_t a = xbusAcc(val(ACC_X));
+        gm.GForceX = xbusSigned16(a);
+        if (absolute16(a) > maxAccX) maxAccX = absolute16(a);
+        gm.maxGForceX = xbusSigned16(maxAccX);
+    }
+    if (has(ACC_Y)) {
+        const int16_t a = xbusAcc(val(ACC_Y));
+        gm.GForceY = xbusSigned16(a);
+        if (absolute16(a) > maxAccY) maxAccY = absolute16(a);
+        gm.maxGForceY = xbusSigned16(maxAccY);
+    }
+    if (has(ACC_Z)) {
+        const int16_t a = xbusAcc(val(ACC_Z));
+        gm.GForceZ = xbusSigned16(a);
+        if (a > maxAccZ) maxAccZ = a;
+        if (a < minAccZ) minAccZ = a;
+        gm.maxGForceZ = xbusSigned16(maxAccZ);
+        gm.minGForceZ = xbusSigned16(minAccZ);
+    }
+    publishStruct(GMETER, gm);
 
     STRU_TELE_GPS_LOC loc{};
     loc.identifier = TELE_DEVICE_GPS_LOC;
@@ -164,6 +217,27 @@ static void formatAll() {
     energy.alerts = energy.highCharge = 0;
     publishStruct(ENERGY, energy);
 
+    STRU_TELE_GYRO gyro{};
+    gyro.identifier = TELE_DEVICE_GYRO;          // 0x1A
+    gyro.sID = 0;
+    gyro.gyroX = gyro.gyroY = gyro.gyroZ = static_cast<int16_t>(0x7fff);
+    gyro.maxGyroX = gyro.maxGyroY = gyro.maxGyroZ = static_cast<int16_t>(0x7fff);
+    if (gyroIsInstalled) {
+        const int16_t gx = xbusGyro(gyroX);
+        const int16_t gy = xbusGyro(gyroY);
+        const int16_t gz = xbusGyro(gyroZ);
+        gyro.gyroX = xbusSigned16(gx);
+        gyro.gyroY = xbusSigned16(gy);
+        gyro.gyroZ = xbusSigned16(gz);
+        if (absolute16(gx) > maxGyroX) maxGyroX = absolute16(gx);
+        if (absolute16(gy) > maxGyroY) maxGyroY = absolute16(gy);
+        if (absolute16(gz) > maxGyroZ) maxGyroZ = absolute16(gz);
+        gyro.maxGyroX = xbusSigned16(maxGyroX);
+        gyro.maxGyroY = xbusSigned16(maxGyroY);
+        gyro.maxGyroZ = xbusSigned16(maxGyroZ);
+    }
+    publishStruct(GYRO, gyro);
+
     STRU_TELE_ESC esc{};
     esc.identifier = TELE_DEVICE_ESC;
     esc.sID = 0;
@@ -195,6 +269,21 @@ static void formatAll() {
     rpm.dBm_A = rpm.dBm_B = 0;
     rpm.spare[0] = rpm.spare[1] = 0xffff;
     publishStruct(RPM_TEMP, rpm);
+
+    // ADS1115 #1: user-defined X-Bus frame 0x50.
+    // First four 16-bit values are ADS_1_1 .. ADS_1_4 in oXs millivolts.
+    // EdgeTX's unrecognized-Spektrum fallback reads payload offsets 0,2,4,6
+    // as RAW sensor IDs 0x5000, 0x5002, 0x5004, 0x5006.
+    // NOTE: actual discovery depends on the receiver polling address 0x50.
+    STRU_TELE_USER_16SU ads1{};
+    ads1.identifier = TELE_DEVICE_USER_16SU;
+    ads1.sID = 0;
+    ads1.sField1 = has(ADS_1_1) ? xbusSigned16(clamped(val(ADS_1_1), 0, 32766)) : static_cast<int16_t>(0xffff);
+    ads1.sField2 = has(ADS_1_2) ? xbusSigned16(clamped(val(ADS_1_2), 0, 32766)) : static_cast<int16_t>(0xffff);
+    ads1.sField3 = has(ADS_1_3) ? xbusSigned16(clamped(val(ADS_1_3), 0, 32766)) : static_cast<int16_t>(0xffff);
+    ads1.uField1 = has(ADS_1_4) ? be16(clamped(val(ADS_1_4), 0, 65534)) : 0xffff;
+    ads1.uField2 = ads1.uField3 = ads1.uField4 = 0xffff; // unused
+    publishStruct(ADS1, ads1);
 }
 } // namespace
 
@@ -210,7 +299,7 @@ void setupXbusSpektrum() {
         printf("[XBUS] PIO0 conflict: disable SBUS_OUT and ESC for this test.\n");
         return;
     }
-    for (uint8_t i = 0; i < 7; ++i) {
+    for (uint8_t i = 0; i < kSensorCount; ++i) {
         memset(published[i], 0xff, kPacketLength);
         published[i][0] = ids[i];
         published[i][1] = 0;
@@ -218,10 +307,14 @@ void setupXbusSpektrum() {
     memset(tx, 0xff, sizeof(tx));
     formatAll();
     i2c_multi_init(pio0, config.pinTlm);
+    // PIO owns these pins: keep GPIO_FUNC_PIO0 set by i2c_multi_init().
+    // RP2040 internal pull-ups (~50-80 kohm) only supplement external pull-ups.
+    gpio_pull_up(config.pinTlm);       // SDA
+    gpio_pull_up(config.pinPrimIn);    // SCL
     i2c_multi_set_request_handler(request);
-    for (uint8_t i = 0; i < 7; ++i) i2c_multi_enable_address(ids[i]);
+    for (uint8_t i = 0; i < kSensorCount; ++i) i2c_multi_enable_address(ids[i]);
     ready = true;
-    printf("[XBUS] PIO0 SDA=GP%u SCL=GP%u, 7 addresses enabled\n", config.pinTlm, config.pinPrimIn);
+    printf("[XBUS] PIO0 SDA=GP%u SCL=GP%u, %u addresses enabled\n", config.pinTlm, config.pinPrimIn, kSensorCount);
 }
 
 void handleXbusSpektrum() {
@@ -233,10 +326,27 @@ void handleXbusSpektrum() {
     }
     if (debugTlm == 'Y' && now - lastDebug >= 2000) {
         lastDebug = now;
-        printf("[XBUS] req: 11=%lu 16=%lu 17=%lu 18=%lu 20=%lu 40=%lu 7E=%lu\n",
-               (unsigned long)requests[AIR], (unsigned long)requests[GPS_LOC],
-               (unsigned long)requests[GPS_STAT], (unsigned long)requests[ENERGY],
+        printf("[XBUS] req: 11=%lu 14=%lu 16=%lu 17=%lu 18=%lu 1A=%lu 20=%lu 40=%lu 7E=%lu 50=%lu\n",
+               (unsigned long)requests[AIR], (unsigned long)requests[GMETER],
+               (unsigned long)requests[GPS_LOC], (unsigned long)requests[GPS_STAT],
+               (unsigned long)requests[ENERGY], (unsigned long)requests[GYRO],
                (unsigned long)requests[ESC], (unsigned long)requests[VARIO_IDX],
-               (unsigned long)requests[RPM_TEMP]);
+               (unsigned long)requests[RPM_TEMP], (unsigned long)requests[ADS1]);
+        printf("[XBUS ADS1] 1=%ld 2=%ld 3=%ld 4=%ld mV (50 requests=%lu)\n",
+               long(has(ADS_1_1) ? val(ADS_1_1) : -1),
+               long(has(ADS_1_2) ? val(ADS_1_2) : -1),
+               long(has(ADS_1_3) ? val(ADS_1_3) : -1),
+               long(has(ADS_1_4) ? val(ADS_1_4) : -1),
+               (unsigned long)requests[ADS1]);
+        // Diagnostic only: core0 MPU values before/after X-Bus scaling.
+        // Zero raw rates with gyroIsInstalled=1 can indicate that the gyro
+        // mixer is disabled: mpu.cpp does not send raw rates in that mode.
+        printf("[XBUS MPU] installed=%u gyroChan=%d raw=%d,%d,%d XBUS_0.1dps=%d,%d,%d ACC_mg=%ld,%ld,%ld\n",
+               unsigned(gyroIsInstalled), int(config.gyroChanControl),
+               int(gyroX), int(gyroY), int(gyroZ),
+               int(xbusGyro(gyroX)), int(xbusGyro(gyroY)), int(xbusGyro(gyroZ)),
+               long(has(ACC_X) ? val(ACC_X) : 0),
+               long(has(ACC_Y) ? val(ACC_Y) : 0),
+               long(has(ACC_Z) ? val(ACC_Z) : 0));
     }
 }

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <stdint.h>
-#define VERSION "3.0.11 & I2C"
+#define VERSION "3.0.11.5 & I2C"
 
 #define DEBUG  // force the MCU to wait for some time for the USB connection; still continue if not connected
 
@@ -198,7 +198,6 @@
 #define STEINHART_B 2.1644E-4
 #define STEINHART_C 1.0619E-07
 
-
 // --------- Parameters for GPS ---------------
 #define GPS_REFRESH_RATE 10 // For Ublox GPS, it is possible to select a refresh rate of 1Hz, 5Hz (defeult) or 10Hz 
 //                        note :a casic gps has to be configured before use in order to generate only NAV-PV messages at 38400 bauds
@@ -256,16 +255,17 @@
 // ---------- ESC --------------------------------------------------------
 #define ESC_MAX_CURRENT 250000.0 // used for Hobbywing V4 to reject dummy values ; 250000 is in ma = 250 A 
 //#define ESC_MIN_THROTTLE 254    // used for Hobbywing V4 to reject dummy values ; 1024 = 100%; so e.g. 256 = 25% of max
+
 // -------------- Camera stabilizer ----------------------------------------
 // uncomment PITCH_CONTROL_CHANNEL and/or ROLL_CONTROL_CHANNEL if you want to stabilize a camera on those axis)
- 
 //#define PITCH_CONTROL_CHANNEL 16 // Channel used to control the servo for the camera (pitch); uncomment to activate the pitch stabilization
-#define PITCH_RATIO_CHANNEL 15   // Channel used to set up the ratio between pitch and servo movement (optional)
+//#define PITCH_RATIO_CHANNEL 15   // Channel used to set up the ratio between pitch and servo movement (optional)
+#define CAMERA_USE_MPU 1
 #define PITCH_RATIO  100  // Ratio to use when PITCH_RATIO_CHANNEL is undefined (or 255); increase/decrease the value in case of under/over stabilisation  
 #define PITCH_MAX 100     // adapt upper limit of servo travel (should normally be the same value as on TX) 
 #define PITCH_MIN -100    // adapt lower limit of servo travel (should normally be the same value as on TX)
 //#define ROLL_CONTROL_CHANNEL 14// Channel used to control the servo for the camera (roll); uncomment to activate the roll stabilization
-#define ROLL_RATIO_CHANNEL 13    // Channel used to set up the ratio between roll and servo movement
+//#define ROLL_RATIO_CHANNEL 13    // Channel used to set up the ratio between roll and servo movement
 #define ROLL_RATIO  100  // Ratio to use when ROLL_RATIO_CHANNEL is undefined (or 255); increase/decrease the value in case of under/over stabilisation
 #define ROLL_MAX 100     // adapt upper limit of servo travel 
 #define ROLL_MIN -100    // adapt lower limit of servo travel
@@ -371,6 +371,11 @@
 #define _accScaleYZ 0.0;
 #define _pinHigh 255;   // force a level High on this pin (when defined between 0 and 29)
 #define _pinLow 255;   // force a level Low on this pin (when defined between 0 and 29)
+
+#define _pinCamPitch 255;
+#define _pinCamPitchRatio 255;
+#define _pinCamRoll 255;
+#define _pinCamRollRatio 255;
 
 // ------  for gyro   -------
 #define _gyroChanControl 0xFF // Rc channel used to say if gyro is implemented or not and to select the mode and the general gain. Value must be in range 1/16 or 255 (no gyro)

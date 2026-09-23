@@ -26,18 +26,18 @@ void set2();
 
 // Radiolink structure with defaults values
 struct STREAM_DATA {
-  float battVoltage = 12.75;
-  float altitude = 10;
-  int climb = 55;
-  float roll = 1;
-  float pitch = 2;
-  float yaw = 3;
-  uint8_t gps_sats = 5;
-  int32_t gps_lon = -6000000L;//aérodrome, degrés x 10000000
-  int32_t gps_lat = 447333300L;//aérodrome, degrés x 10000000
-  float home_lon = -0.5672574;//Villenave d'Ornon
-  float home_lat = 44.7799813;//Villenave d'Ornon
-  float gps_speed = 100;
+  float battVoltage = 0;
+  float altitude = 0;
+  int climb = 0;
+  float roll = 0;
+  float pitch = 0;
+  float yaw = 0;
+  uint8_t gps_sats = 0;
+  int32_t gps_lon = 0;//degrés x 10000000
+  int32_t gps_lat = 0;//degrés x 10000000
+  float home_lon = 0;
+  float home_lat = 0;
+  float gps_speed = 0;
   bool gps_fix = false;
-  float home_distance = 220;
+  float home_distance = 0;
 };

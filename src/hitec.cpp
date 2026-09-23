@@ -76,6 +76,16 @@ static inline int32_t clamp(int64_t v, int32_t low, int32_t high) {
 static inline bool has(fieldIdx id) { return fields[id].available; }
 static inline int32_t val(fieldIdx id) { return fields[id].value; }
 
+// HITEC 0x19: four independent one-byte servo-current fields (EdgeTX: 0.1 A).
+// oXs ADS measurements are in mV. Send one raw step per 100 mV:
+// 0 mV -> 0 (0.0 on the radio), 3300 mV -> 33 (3.3 on the radio).
+// This is only telemetry formatting: ADC acquisition and fields[] stay unchanged.
+// HITEC has no signed representation for these four values; clamp negatives to 0.
+static inline uint8_t hitecAdsByte(fieldIdx id) {
+    const int64_t mv = int64_t(val(id));
+    return uint8_t(clamp((mv >= 0 ? mv + 50 : mv - 50) / 100, 0, 255));
+}
+
 // MSRC style: signed DDMM and signed SS.ss. Input is signed degrees x 10^7.
 // Integer arithmetic avoids losing GPS precision with RP2040's 32-bit float.
 static void formatCoord(uint8_t *frame, int32_t coordE7) {
@@ -267,6 +277,17 @@ static void refreshPackets() {
         // MSRC: V1 displayed from raw = (volts - 0.2) * 10.
         if (has(MVOLT)) putLE(&frame(b, 0x18)[1], clamp((int64_t(val(MVOLT)) - 200 + 50) / 100, 0, 65535));
         if (has(CURRENT)) putLE(&frame(b, 0x18)[3], clamp((int64_t(val(CURRENT)) + 500) / 1000, 0, 65535));
+    }
+    // One ADS1115 = four independent EdgeTX telemetry sensors:
+    // 0x1900 / 0x1901 / 0x1902 / 0x1903 (servo currents 1..4).
+    // Payload bytes 1..4, NOT byte 6 (reserved for the trailing frame ID).
+    // Enable 0x19 only when at least one ADS1 measurement is available.
+    if (has(ADS_1_1) || has(ADS_1_2) || has(ADS_1_3) || has(ADS_1_4)) {
+        enable(b, 0x19);
+        if (has(ADS_1_1)) frame(b, 0x19)[1] = hitecAdsByte(ADS_1_1);
+        if (has(ADS_1_2)) frame(b, 0x19)[2] = hitecAdsByte(ADS_1_2);
+        if (has(ADS_1_3)) frame(b, 0x19)[3] = hitecAdsByte(ADS_1_3);
+        if (has(ADS_1_4)) frame(b, 0x19)[4] = hitecAdsByte(ADS_1_4);
     }
     if (has(AIRSPEED)) {
         enable(b, 0x1A);

@@ -53,10 +53,12 @@ struct CONFIG{
     uint8_t pinEsc;
     uint8_t escType;
     uint16_t pwmHz ;
+    /* Add Camera */
     uint8_t CamPitchChannel;
     uint8_t CamRollChannel;
     uint8_t CamPitchRatio;
-    uint8_t CamRollRatio; 			
+    uint8_t CamRollRatio;
+    /* Add Camera */		
     //                for gyro
     uint8_t gyroChanControl ; // Rc channel used to say if gyro is implemented or not and to select the mode and the general gain. Value must be in range 1/16 or 255 (no gyro)
     uint8_t gyroChan[3] ;    // Rc channel used to transmit original Ail, Elv, Rud stick position ; Value must be in range 1/16 when gyroControlChannel is not 255

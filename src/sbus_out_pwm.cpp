@@ -435,42 +435,55 @@ void updatePWM(){
     if ( ! lastRcChannels) return ;   // skip if we do not have last channels
     if ( rcChannelsUsCorrChanged){  // when new Rc channel is received (flag set by CRSF_IN, SBUS, FBUS, EXBUS, SRXL2, IBUS...)
         // apply corrections for camera in rcChannelsUsCorr
-        #ifdef PITCH_CONTROL_CHANNEL
+        //#ifdef PITCH_CONTROL_CHANNEL
+        #ifdef CAMERA_USE_MPU //comment into config.h if not needed
         if ( (mpu.mpuInstalled) && fields[PITCH].onceAvailable) {
             // here we supposed that a PITCH_RATIO of 100 should provide a displacement of 100% of the servo and 90° of the camera
             // so compensation of pitch 90° should change PWM value by 512 step
             // so correction = pitch /90 * 512 * ratio /100 = pitch * ratio * 512 / 9000 = pitch *ratio * 0.0569
             // here pitch in 0.1 of degree and so we have to multiply by 512/90000 = 0.00569
-            ratio = PITCH_RATIO;
-            #if defined(PITCH_RATIO_CHANNEL) && (PITCH_RATIO_CHANNEL >0) && (PITCH_RATIO_CHANNEL <= 16) 
-            ratio = ( (float) rcChannelsUs[PITCH_RATIO_CHANNEL - 1] - 1500) * 0.2; // 0.2 in order to convert 500us to 100 ratio
-            #endif
-            _pwmValue = ((int16_t) rcChannelsUs[PITCH_CONTROL_CHANNEL - 1]) - (int16_t) (cameraPitch * ratio * 0.00569) ; 
+            //ratio = PITCH_RATIO;
+            ratio = config.CamPitchRatio;
+            //#if defined(PITCH_RATIO_CHANNEL) && (PITCH_RATIO_CHANNEL >0) && (PITCH_RATIO_CHANNEL <= 16) {
+            if (config.CamPitchRatio > 0 && config.CamPitchRatio <= 16){
+                //ratio = ( (float) rcChannelsUs[PITCH_RATIO_CHANNEL - 1] - 1500) * 0.2; // 0.2 in order to convert 500us to 100 ratio
+                ratio = ( (float) rcChannelsUs[config.CamPitchRatio - 1] - 1500) * 0.2; // 0.2 in order to convert 500us to 100 ratio
+            }
+            //#endif
+            //_pwmValue = ((int16_t) rcChannelsUs[PITCH_CONTROL_CHANNEL - 1]) - (int16_t) (cameraPitch * ratio * 0.00569) ; 
+            _pwmValue = ((int16_t) rcChannelsUs[config.CamPitchChannel - 1]) - (int16_t) (cameraPitch * ratio * 0.00569) ; 
             pwmMax = fmapMinMax(PITCH_MAX);
             pwmMin = fmapMinMax(PITCH_MIN);
             if (_pwmValue > pwmMax ) _pwmValue = pwmMax;
             if (_pwmValue < pwmMin ) _pwmValue = pwmMin;
             //printf("%i %i %i %f %f\n", (int) cameraPitch , (int) pwmValue , (int) _pwmValue , (float) rcChannelsUs[PITCH_RATIO_CHANNEL - 1] , ratio);
-            rcChannelsUsCorr[PITCH_CONTROL_CHANNEL - 1] = _pwmValue;
+            //rcChannelsUsCorr[PITCH_CONTROL_CHANNEL - 1] = _pwmValue;
+            rcChannelsUsCorr[config.CamPitchChannel - 1] = _pwmValue;
         } 
-        #endif
-        #ifdef ROLL_CONTROL_CHANNEL
+        //#endif
+        //#ifdef ROLL_CONTROL_CHANNEL
         if ( (mpu.mpuInstalled) && fields[ROLL].onceAvailable) {
             // here we supposed that a PITCH_RATIO of 100 should provide a displacement of 100% of the servo and 90° of the camera
             // so compensation of pitch 90° should change PWM value by 512 step
             // so correction = pitch /90 * 512 * ratio /100 = pitch * ratio * 512 / 9000 = pitch *ratio * 0.0569
             // here pitch in 0.1 of degree and so we have to multiply by 512/90000 = 0.00569
-            ratio = ROLL_RATIO;
-            #if defined(ROLL_RATIO_CHANNEL) && (ROLL_RATIO_CHANNEL >0) && (ROLL_RATIO_CHANNEL <= 16) 
-            ratio = ( (float) rcChannelsUs[ROLL_RATIO_CHANNEL - 1] - 1500) * 0.2;
-            #endif
-            _pwmValue = ((int16_t) rcChannelsUs[ROLL_CONTROL_CHANNEL - 1]) - (int16_t) (cameraRoll * ratio * 0.00569) ; 
+            //ratio = ROLL_RATIO;
+            ratio = config.CamRollChannel;
+            //#if defined(ROLL_RATIO_CHANNEL) && (ROLL_RATIO_CHANNEL >0) && (ROLL_RATIO_CHANNEL <= 16) 
+            if (config.CamRollRatio > 0 && config.CamRollRatio <=16){
+                //ratio = ( (float) rcChannelsUs[ROLL_RATIO_CHANNEL - 1] - 1500) * 0.2;
+                ratio = ( (float) rcChannelsUs[config.CamRollRatio - 1] - 1500) * 0.2;
+            }
+            //#endif
+            //_pwmValue = ((int16_t) rcChannelsUs[ROLL_CONTROL_CHANNEL - 1]) - (int16_t) (cameraRoll * ratio * 0.00569) ;
+            _pwmValue = ((int16_t) rcChannelsUs[config.CamRollChannel - 1]) - (int16_t) (cameraRoll * ratio * 0.00569) ;
             pwmMax = fmapMinMax(ROLL_MAX);
             pwmMin = fmapMinMax(ROLL_MIN);
             if (_pwmValue > pwmMax ) _pwmValue = pwmMax;
             if (_pwmValue < pwmMin ) _pwmValue = pwmMin;
             //printf("%i %i %i %i\n", (int) cameraRoll , (int) pwmValue , (int) _pwmValue), (int) ratio;
-            rcChannelsUsCorr[ROLL_CONTROL_CHANNEL - 1] = _pwmValue;
+            //rcChannelsUsCorr[ROLL_CONTROL_CHANNEL - 1] = _pwmValue;
+            rcChannelsUsCorr[config.CamRollChannel - 1] = _pwmValue;
         } 
         #endif
         if ( pwmIsUsed == true) {

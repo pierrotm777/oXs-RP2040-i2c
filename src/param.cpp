@@ -73,6 +73,7 @@ CONFIG config;
 uint8_t debugTlm = 'N';
 uint8_t debugSbusOut = 'N';
 uint8_t debugAccZ = 'N';
+uint8_t cameraUseMPU = 'N';
 
 uint8_t pinCount[30] = {0};
 
@@ -209,8 +210,8 @@ void printHelp(){
     printf("               LOW  (0 V)   LOW      = 0, 1, 2, ..., 29\n");
 
     printf("Rf protocol                 PROTOCOL= Y        Y is S(Sport Frsky), F(Fbus Frsky), B(HUB Frsky), C(CRSF/ELRS), H(Hott), M(Mpx)\n");
-    printf("                                               2(Sbus2 Futaba), J(Jeti), E(jeti Exbus), L (spektrum SRXL2) ,or I(IBus/Flysky)\n");
-    printf("                                               R(Rlink), T(Hitec), X(Xbus)\n");
+    printf("                                               2(Sbus2 Futaba), J(Jeti), E(jeti Exbus), L (spektrum SRXL2), I(IBus/Flysky)\n");
+    printf("                                               R(Rlink), T(Hitec) or X(Xbus)\n");
     printf("    CRSF baudrate:          CRSFBAUD = 420000\n");
             
     printf("Type of ESC :               ESC_TYPE = YYY      YYY is HW4(Hobbywing V4), HW5(Hobbywing V5), ZTW1(ZTW mantis),KON (Kontronik) or BLH(BlHeli) or JETI(Jeti)\n");
@@ -243,7 +244,7 @@ void printHelp(){
     printf("             Yaw            GGY = YYYY             ""    Yaw\n");
     printf("     Gain on stick Throw    GGT = Y             1 (corr. on full throw) , 2 (on half) , 3 (on quater)\n");
     printf("     Max Rotate             GMR = Y             1 (Very low) , 2 (low) , 3 (medium) , 4 (high)\n");
-    printf("     stick Rotate Enable    GRE =Y              1 (disabled) , 2 (enabled)\n");
+    printf("     stick Rotate Enable    GRE = Y             1 (disabled) , 2 (enabled)\n");
     printf("     Stabilize mode         GST = YYY           YY = ON or OFF(=hold mode replace stabilize mode)\n");
     //printf("     Orientation(Hoz./Vert.)GOH = X or GOV = X  0(front X+), 1(back X-), 2(left Y+), 3(right Y-), 4(up Z+), 5(down Z-)\n");
     printf("     PID parameters         PIDx = kpA kiA kdA kpE kiE kdE kpR kiR kdR       x=N(normal), H(hold), S(stab)\n");
@@ -252,12 +253,20 @@ void printHelp(){
     printf("Sequencers                  SEQ = YYYY          See Readme section to see how to fill YYYY\n");
     printf("                            SEQ = DEL           Erase all sequencer\n");
 
-    printf("   Display raw Acc Z        DEBUGACCZ = Y or N  display vertical acc (useful to check offsets)\n");
+    printf("Camera Channels\n");
+    printf("             Pitch          PITCH  = Y          Y = 1 to 16\n");
+    printf("             Roll           ROLL   = Y          Y = 1 to 16\n");
+    printf("             Pitch Ratio    PPITCH = Y          Y = 1 to 16\n");
+    printf("             Roll Ratio     PROLL  = Y          Y = 1 to 16\n");
+
     printf("Testing                     FV                  Field Values (display all telemetry internal values)\n")  ;
     printf("                            FVP                 Field Values Positieve (force the tlm values to positieve dummy values\n")  ;
     printf("                            FVN                      idem with negatieve values\n")  ;
     printf("                            PWM                 Display the current PWM values (in micro sec)\n");
-    printf("                            DEBUG=HELP          display commands to get some debug messages (up to next reset)\n");
+    printf("\n");
+    printf("Display HELP                DEBUG=HELP          display Locateur or Esc commands to get some debug messages (up to next reset)\n");
+    printf("Display raw Acc Z           DEBUGACCZ = Y or N  display vertical acc (useful to check offsets)\n");
+    printf("Display Telemetry dbug      DEBUGTLM  = Y or N  display minimum debug for each telemetry\n");
     printf("\n");
     printf("To get the current config, just press Enter; send DUMP in order to get it in a way that allows copy/edit/paste.\n");
     printf("To save changes, send SAVE; to get list of all commands send ""?""\n");
@@ -666,6 +675,7 @@ int8_t handleOneCmd( char * bufferPos){ // handle one command with buffer starti
             return 1;
         }
     }
+
     // change for Camera pin Pitch Ratio
     if ( strcmp("PRATIO", pkey) == 0 ) { 
         ui = strtoul(pvalue, &ptr, 10);
@@ -692,7 +702,21 @@ int8_t handleOneCmd( char * bufferPos){ // handle one command with buffer starti
             return 1;
         }
     }
-        
+
+/*     if ( strcmp("CAMERA", pkey) == 0 ) { // if the key is CAMERA
+        if (strcmp("Y", pvalue) == 0) {
+            cameraUseMPU = 'Y';
+            printf("Info : CAMERA is enabled and use now MPU\n");
+            return 0;
+        } else if (strcmp("N", pvalue) == 0) {
+            cameraUseMPU = 'N';
+            printf("Info : CAMERA is disabled\n");
+            return 0; 
+        } else  {
+            printf("Error : CAMERA must be Y or N\n");
+        }
+    } */
+
     // change crsf baudrate
     if ( strcmp("CRSFBAUD", pkey) == 0 ) { // if the key is CRSFBAUD
         ui = strtoul(pvalue, &ptr, 10);
@@ -740,7 +764,7 @@ int8_t handleOneCmd( char * bufferPos){ // handle one command with buffer starti
             debugAccZ = 'N';
             return 0; // this is not saved
         } else  {
-            printf("Error : DEBUGTLM must be Y or N\n");
+            printf("Error : DEBUGACCZ must be Y or N\n");
         }
     }
     
@@ -825,7 +849,7 @@ int8_t handleOneCmd( char * bufferPos){ // handle one command with buffer starti
             return 1;
 /* Add I2C Protocols */
         } else  {
-            printf("Error : protocol must be S(Sport Frsky), F(Fbus Frsky), B(Hub Frsky), C(CRSF=ELRS), J(Jeti), E(jeti Exbus), H(Hott), M(Mpx), 2(Sbus2 Futaba), L(SRXL2 Spektrum) or I(Ibus/Flysky)\n");
+            printf("Error : protocol must be S(Sport Frsky), F(Fbus Frsky), B(Hub Frsky), C(CRSF=ELRS), J(Jeti), E(jeti Exbus), H(Hott), M(Mpx), 2(Sbus2 Futaba), L(SRXL2 Spektrum), I(Ibus/Flysky), R(Radiolink), T(Hitec) or X(Spektrum Xbus)\n");
         }
     }
     
@@ -1752,11 +1776,11 @@ void checkConfigAndSequencers(){     // set configIsValid
         printf("Error in parameters: For RadioLink, TLM pin must be defined\n");
         configIsValid=false;
     }
-    if (config.protocol == 'X' && config.pinPrimIn == 255  ){/*Ajout RadioLink*/
+    if (config.protocol == 'X' && config.pinPrimIn == 255  ){/*Ajout Spektrum Xbus*/
         printf("Error in parameters: For Spektrum Xbus, PRI pin must be defined\n");
         configIsValid=false;
     }
-    if (config.protocol == 'X' && config.pinTlm == 255  ){/*Ajout RadioLink*/
+    if (config.protocol == 'X' && config.pinTlm == 255  ){/*Ajout Spektrum Xbus*/
         printf("Error in parameters: For Spektrum Xbus, TLM pin must be defined\n");
         configIsValid=false;
     }
@@ -1845,7 +1869,7 @@ void printConfigAndSequencers(){   // print all and perform checks
     printf("PWM Channels 13,14,15,16  = %4u %4u %4u %4u\n", config.pinChannels[12] , config.pinChannels[13] , config.pinChannels[14] , config.pinChannels[15]);
     printf("Voltage 1, 2, 3, 4        = %4u %4u %4u %4u (V1 / V4 = 26, 27, 28, 29)\n", config.pinVolt[0] , config.pinVolt[1], config.pinVolt[2] , config.pinVolt[3]);
     printf("RGB led . . . . . . . . . = %4u  (RGB    = 0, 1, 2, ..., 29)\n", config.pinLed);
-    printf("Camera  P,R,PR,RR         = %4u %4u %4u %4u (PITCH, ROLL, PRATIO, RRATIO  = 1 to 16)\n", config.CamPitchChannel , config.CamRollChannel, config.CamPitchRatio , config.CamRollRatio);																																															 
+    printf("Camera Channels P,R,PR,RR = %4u %4u %4u %4u (PITCH, ROLL, PRATIO, RRATIO  = 1 to 16)\n", config.CamPitchChannel , config.CamRollChannel, config.CamPitchRatio , config.CamRollRatio);																																															 
     printf("Logger  . . . . . . . . . = %4u  (LOG    = 0, 1, 2, ..., 29)\n", config.pinLogger );
     printf("ESC . . . . . . . . . . . = %4u  (ESC_PIN= 0, 1, 2, ..., 29)\n", config.pinEsc );
     printf("Locator CS  . . . . . . . = %4u  (SPI_CS = 0, 1, 2, ..., 29)\n", config.pinSpiCs );
@@ -2058,7 +2082,7 @@ void printConfigAndSequencers(){   // print all and perform checks
     }    
     #endif
     if(mpu.mpuInstalled){
-        printf("Acc/Gyro is detected using MP6050\n")  ;
+        printf("Acc/Gyro is detected using MP6050 at I2c adress 68\n")  ;
         printf("     Acceleration param: ACC= %f %f %f\n", config.accOffX , config.accOffY , config.accOffZ);
         printf("                              %f %f %f\n", config.accScaleXX , config.accScaleXY ,config.accScaleXZ );
         printf("                              %f %f %f\n", config.accScaleXY , config.accScaleYY ,config.accScaleYZ );
@@ -2290,6 +2314,12 @@ void fillConfigWithDefault(){
 
     config.pinHigh = _pinHigh;
     config.pinLow = _pinLow;
+
+    config.CamPitchChannel = _pinCamPitch;
+    config.CamPitchRatio   = _pinCamPitchRatio;
+    config.CamRollChannel  = _pinCamRoll;
+    config.CamRollRatio    = _pinCamRollRatio;
+
 }
 void setupConfig(){   // The config is uploaded at power on
     if (*flash_target_contents == CONFIG_VERSION ) {
@@ -3214,6 +3244,10 @@ void dumpConfig(){
     if (config.pinVolt[2] != 255) printf("V3 = %i;\n", config.pinVolt[2] );
     if (config.pinVolt[3] != 255) printf("V4 = %i;\n", config.pinVolt[3] );
     if (config.pinLed != 255) printf("RGB = %i;\n", config.pinLed );
+    if (config.CamPitchChannel != 255) printf("PITCH = %i;\n", config.CamPitchChannel );
+    if (config.CamRollChannel != 255)  printf("ROLL = %i;\n", config.CamRollChannel );
+    if (config.CamPitchRatio != 255)   printf("PPITCH = %i;\n", config.CamPitchRatio );
+    if (config.CamRollRatio != 255)    printf("PROLL = %i;\n", config.CamRollRatio );
     if (config.pinLogger != 255) printf("LOG = %i;\n", config.pinLogger );
     if (config.pinEsc != 255) printf("ESC_PIN = %i;\n", config.pinEsc );
     if (config.pinSpiCs != 255) printf("SPI_CS = %i;\n", config.pinSpiCs );
