@@ -34,5 +34,6 @@
     "raspberry-pi-pico.cmakeAutoConfigure": true,
     "raspberry-pi-pico.useCmakeTools": false,
     "raspberry-pi-pico.cmakePath": "C:/Users/pierrot/.pico-sdk/cmake/v3.29.9/bin/cmake.exe",
-    "raspberry-pi-pico.ninjaPath": "C:/Users/pierrot/.pico-sdk/ninja/v1.12.1/ninja.exe"
+    "raspberry-pi-pico.ninjaPath": "C:/Users/pierrot/.pico-sdk/ninja/v1.12.1/ninja.exe",
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
 }

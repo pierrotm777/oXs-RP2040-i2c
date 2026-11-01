@@ -83,7 +83,7 @@
 
 #define SXRL2_OXS_DEVICEID    0x00
 #define SRXL2_BUFFER_LENGTH   80
-#define SRXL2_PORT_BAUDRATE_HIGH 40000
+#define SRXL2_PORT_BAUDRATE_HIGH 400000
 #define SRXL2_PORT_BAUDRATE_DEFAULT 115200
 #define SRXL2_RUNNING 1
 #define SRXL2_LISTENING 2
@@ -145,6 +145,7 @@ uint32_t restoreSrxl2PioToReceiveMicros = 0; // when 0, the pio is normally in r
                                         // otherwise, it is the timestamp when pio transmit has to be restore to receive mode
 
 extern field fields[];  // list of all telemetry fields that are measured
+extern uint8_t forcedFields; // 0=normal, 1=FVP, 2=FVN
 
 volatile uint32_t srxl2LastRxUs;
 uint32_t srxl2IdleDelay ; // delay in Us between last char and current proccess (in loop)
@@ -241,14 +242,38 @@ void handleSrxl2RxTx(void){   // main loop : restore receiving mode , wait for t
             // we get the value from the queue and save it
             queue_try_remove (&srxl2RxQueue,&data);
             if ( data > 0x0100){
-                fullFrameIsreceived = true;
-                break; // exit the while because we got a byte that says that UART was Idle 
+                // Ignore stale idle markers when no bytes are pending.
+                if (srxl2RxBufferIdx > 0) {
+                    fullFrameIsreceived = true;
+                    break;
+                }
+                continue;
             }
+
+            // Every valid SRXL2 frame starts with 0xA6.
+            if (srxl2RxBufferIdx == 0 && (uint8_t)data != SRXL2_HEADER_BYTE1) {
+                continue;
+            }
+
             if (srxl2RxBufferIdx < SRXL2_BUFFER_LENGTH) {
-                srxl2RxBuffer[srxl2RxBufferIdx] = data;
-                srxl2RxBufferIdx++;
+                srxl2RxBuffer[srxl2RxBufferIdx++] = (uint8_t)data;
+
+                // Byte 2 is the full SRXL2 frame length. This prevents two
+                // consecutive A6 CD frames from being merged into one buffer.
+                if (srxl2RxBufferIdx >= 3) {
+                    const uint8_t expectedLength = srxl2RxBuffer[2];
+                    if (expectedLength >= 5U && expectedLength <= SRXL2_BUFFER_LENGTH &&
+                        srxl2RxBufferIdx == expectedLength) {
+                        fullFrameIsreceived = true;
+                        break;
+                    }
+                    if (expectedLength < 5U || expectedLength > SRXL2_BUFFER_LENGTH ||
+                        srxl2RxBufferIdx > expectedLength) {
+                        srxl2RxBufferIdx = 0;
+                    }
+                }
             } else {
-                srxl2RxBufferIdx = 0 ; // loose the buffer if to long
+                srxl2RxBufferIdx = 0;
             }
     }
     uint32_t irqStatus = save_and_disable_interrupts();
@@ -553,6 +578,7 @@ void fbusDecodeRcChannels(){             // this code is similar to Sbus in
 
 // supported spektrum telemetry formats are:
 // 0X26 GPS binary
+// 0X17 GPS status + UTC time (sent in parallel with 0x26)
 // 0X40 Vspeed + alt
 // 0x11 Airspeed
 // 0X7E RPM
@@ -781,7 +807,10 @@ bool srxl2IsFrameDataAvailable(uint8_t frameIdx){
             uint8_t flags;
             flags = 0;
             gpsCoordinateDDDMMmmmm_t coordinate; // structure ot convert long and lat
-            if ((fields[NUMSAT].available) and (fields[NUMSAT].value > 100)) { // only when there is a 3d fix
+            if (((fields[NUMSAT].available) and (fields[NUMSAT].value > 100)) ||
+                (((forcedFields == 1) || (forcedFields == 2)) && fields[GPS_TIME].available)) {
+                // Real GPS: NUMSAT > 100 marks a 3D fix.
+                // FVP/FVN: GPS_TIME is forced even without that encoded fix flag.
                 srxl2Frames.gpsLoc.identifier = TELE_DEVICE_GPS_LOC; //0X16
                 srxl2Frames.gpsLoc.sID = 0; // Secondary ID
                 if (fields[ALTITUDE].available) {
@@ -826,6 +855,7 @@ bool srxl2IsFrameDataAvailable(uint8_t frameIdx){
                 return true;
             }    
             break;
+            #endif // end USE_GPS_BCD_INSTEAD_OF_BINARY
 
 /*
 	uint8_t		identifier;														// Source device = 0x17
@@ -836,129 +866,150 @@ bool srxl2IsFrameDataAvailable(uint8_t frameIdx){
 	uint8_t		altitudeHigh;													// BCD, meters, format 2.0 (High order of altitude)
 */
         case 5: //TELE_DEVICE_GPS_STATS		(0x17)										// GPS Status (Eagle Tree)
-            if ((fields[NUMSAT].available) and (fields[NUMSAT].value > 100)) { // only when there is a 3d fix
+            // [DSM GPS TIME FIX]
+            // Keep 0x26 GPS Binary for position, but also send 0x17 whenever
+            // GPS_TIME is fresh. 0x26 consumes NUMSAT.available, therefore
+            // 0x17 must NOT depend on NUMSAT.available.
+            if (fields[GPS_TIME].available) {
                 srxl2Frames.gpsStats.identifier = TELE_DEVICE_GPS_STATS; //0X17
                 srxl2Frames.gpsStats.sID = 0; // Secondary ID
 
-                // Number of sats and altitude (high bits)
-                uint8_t numSat = fields[NUMSAT].value;
-                if (numSat > 100) numSat = numSat % 100;
-                srxl2Frames.gpsStats.numSats = dec2bcd( (uint16_t) numSat);
-                // high part of altitude
-                srxl2Frames.gpsStats.altitudeHigh = dec2bcd(fields[ALTITUDE].value / 100000);
-                 // Speed (knots)
-                uint16_t speedTmp = fields[GROUNDSPEED].value * 1944 / 1000;
-                srxl2Frames.gpsStats.speed = (speedTmp > 9999) ? (dec2bcd(9999)) : (dec2bcd(speedTmp));
-                //Time
-                if (fields[GPS_TIME].available){
-                    uint32_t hhmmss00;
-                    hhmmss00 = fields[GPS_TIME].value; // hhmmss00 with hh, mm, ss in binary
-                    uint32_t hh; uint32_t mm ; uint32_t ss ;
-                    hh = (uint32_t) dec2bcd( (hhmmss00 >> 24) &0XFF); 
-                    mm = (uint32_t) dec2bcd( (hhmmss00 >> 16) &0XFF);
-                    ss = (uint32_t) dec2bcd( (hhmmss00 >> 8) &0XFF);
-                    srxl2Frames.gpsStats.UTC = (hh<<24) | (mm<<16) | (ss<<8);   // hhmmss00 with hh, mm, ss in bcd
-                } else {
-                    srxl2Frames.gpsStats.UTC = 0; 
-                }
-                
-                //srxl2Frames.gpsStats.UTC = 0X12345600;
-                srxl2Frames.gpsStats.notUsed1 = 0XFFFF ;
-                srxl2Frames.gpsStats.notUsed2 = 0XFFFF ;
-                srxl2Frames.gpsStats.notUsed3 = 0XFFFF ; 
-                fields[NUMSAT].available = false;
-                return true;
-            }    
-            break;
-            #endif // end USE_GPS_BCD_INSTEAD_OF_BINARY
-/*
-        
-        
-        case 6: //TELE_DEVICE_RX_MAH
-            if (fields[MVOLT].available || fields[CURRENT].available){
-                srxl2Frames.voltCurrentCap.identifier = TELE_DEVICE_RX_MAH ;  // 0X18
-                srxl2Frames.voltCurrentCap.sID = 0; // Secondary ID
-                if (fields[CURRENT].available) {
-                    tempI16 = (int16_t) (int_round( fields[CURRENT].value ,  10));  //// Instantaneous current, 0.01A (0-328.7A)		7FFF-> no data  
-                    srxl2Frames.voltCurrentCap.current_A  = swapBinary(tempI16);
-                } else {
-                    srxl2Frames.voltCurrentCap.current_A = 0xFF7F ; 
-                }
-                
-                if (fields[CAPACITY].available) {
-                    if ( fields[CAPACITY].value > 0 ){   
-                        tempU16 =  (uint16_t) (int_round( fields[CAPACITY].value ,  1));  //// Integrated mAh used, 0.1mAh (0-3276.6mAh)  
-                        srxl2Frames.voltCurrentCap.chargeUsed_A  = swapBinary(tempU16);
-                    } else {
-                        srxl2Frames.voltCurrentCap.chargeUsed_A  = 0 ;
-                    }
-                } else {
-                    srxl2Frames.voltCurrentCap.chargeUsed_A = 0xFFFF ; 
-                }
-                
-                if (fields[MVOLT].available) {
-                    if ( fields[MVOLT].value > 0 ){   
-                        tempU16  = (uint16_t) (int_round( fields[MVOLT].value ,  10));  // Volts, 0.01V increments (0-16.00V)
-                        srxl2Frames.voltCurrentCap.volts_A  = swapBinary(tempU16);
-                    } else {
-                        srxl2Frames.voltCurrentCap.volts_A  = 0 ;
-                    }
-                } else {
-                    srxl2Frames.voltCurrentCap.volts_A = 0xFFFF ; 
-                }
-                
-                srxl2Frames.voltCurrentCap.current_B = 0xFF7F ;
-                srxl2Frames.voltCurrentCap.chargeUsed_B = 0xFFFF ;
-                srxl2Frames.voltCurrentCap.volts_B = 0xFFFF ;
-                srxl2Frames.voltCurrentCap.alerts = 0 ;// Bit mapped alert conditions (see below)
-                srxl2Frames.voltCurrentCap.highCharge = 0;	//High nybble is extra bits for chargeUsed_B, Low is for chargeUsed_A
+                // Number of sats. oXs adds 100 when a 3D fix is present.
+                uint16_t numSatTmp = (uint16_t) fields[NUMSAT].value;
+                if (numSatTmp >= 100) numSatTmp -= 100;
+                if (numSatTmp > 99) numSatTmp = 99;
+                srxl2Frames.gpsStats.numSats = dec2bcd(numSatTmp);
+
+                // High part of altitude (metres).
+                int32_t altitudeHigh = fields[ALTITUDE].value / 100000;
+                if (altitudeHigh < 0) altitudeHigh = 0;
+                if (altitudeHigh > 99) altitudeHigh = 99;
+                srxl2Frames.gpsStats.altitudeHigh = dec2bcd((uint16_t) altitudeHigh);
+
+                // Speed in 0.1 knot, packed BCD.
+                uint32_t speedTmp = ((uint32_t) fields[GROUNDSPEED].value * 1944UL) / 1000UL;
+                if (speedTmp > 9999UL) speedTmp = 9999UL;
+                srxl2Frames.gpsStats.speed = dec2bcd((uint16_t) speedTmp);
+
+                // GPS_TIME is HH:MM:SS:00 with HH/MM/SS stored as binary bytes.
+                // The 32-bit field is copied little-endian into the SRXL2 payload,
+                // yielding bytes 00,SS,MM,HH as expected by Spektrum 0x17.
+                uint32_t hhmmss00 = fields[GPS_TIME].value;
+                uint32_t hh = (uint32_t) dec2bcd((hhmmss00 >> 24) & 0XFF);
+                uint32_t mm = (uint32_t) dec2bcd((hhmmss00 >> 16) & 0XFF);
+                uint32_t ss = (uint32_t) dec2bcd((hhmmss00 >> 8)  & 0XFF);
+                srxl2Frames.gpsStats.UTC = (hh << 24) | (mm << 16) | (ss << 8);
+
+                srxl2Frames.gpsStats.notUsed1 = 0XFFFF;
+                srxl2Frames.gpsStats.notUsed2 = 0XFFFF;
+                srxl2Frames.gpsStats.notUsed3 = 0XFFFF;
+
+                // Consume this time sample. A real GPS sets it available again
+                // on the next update; FVP/FVN reapply forced fields from main.
+                fields[GPS_TIME].available = false;
                 return true;
             }
             break;
-*/
-        case 7: //TELE_DEVICE_LIPOMON
-            if (fields[ADS_1_1].available || fields[ADS_1_2].available || fields[ADS_1_3].available ||fields[ADS_1_4].available ){
-                srxl2Frames.lipoMon.identifier = TELE_DEVICE_LIPOMON ;  // 0X3A
-                srxl2Frames.lipoMon.sID = 0; // Secondary ID
-                //fields[ADS_1_1].available = true;
-                //fields[ADS_1_1].value = 11111;
-                //fields[ADS_1_2].available = true;
-                //fields[ADS_1_2].value = 22222;
-                //fields[ADS_1_3].available = true;
-                //fields[ADS_1_3].value = 33333;
-                //fields[ADS_1_4].available = true;
-                //fields[ADS_1_4].value = 44444;
-                
-                if (fields[ADS_1_1].available && fields[ADS_1_1].value >= 0) {
-                    tempU16 = (uint16_t) (int_round( fields[ADS_1_1].value ,  10));   
-                } else { 
-                    tempU16 = 0x7FFF ; //		7FFF-> no data 
+        case 6: // TELE_DEVICE_RX_MAH (0x18)
+            if (fields[MVOLT].available || fields[CURRENT].available || fields[CAPACITY].available){
+                srxl2Frames.voltCurrentCap.identifier = TELE_DEVICE_RX_MAH;
+                srxl2Frames.voltCurrentCap.sID = 0;
+
+                if (fields[CURRENT].available && fields[CURRENT].value >= 0) {
+                    // oXs CURRENT is mA; Spektrum uses 0.01A = 10mA.
+                    tempI16 = (int16_t) int_round(fields[CURRENT].value, 10);
+                    srxl2Frames.voltCurrentCap.current_A = swapBinary(tempI16);
+                } else {
+                    srxl2Frames.voltCurrentCap.current_A = 0xFF7F;
                 }
-                srxl2Frames.lipoMon.cell1  = swapBinary(tempU16);
-                if (fields[ADS_1_2].available && fields[ADS_1_2].value >= 0) {
-                    tempU16 = (uint16_t) (int_round( fields[ADS_1_2].value ,  10));   
-                } else { 
-                    tempU16 = 0x7FFF ; //		7FFF-> no data 
+
+                uint32_t chargeTenthsMah = 0;
+                if (fields[CAPACITY].available && fields[CAPACITY].value > 0) {
+                    // Spektrum 0x18 charge is 20-bit in 0.1mAh.
+                    chargeTenthsMah = (uint32_t)fields[CAPACITY].value * 10UL;
+                    if (chargeTenthsMah > 0xFFFFFUL) chargeTenthsMah = 0xFFFFFUL;
+                    srxl2Frames.voltCurrentCap.chargeUsed_A =
+                        swapBinary((uint16_t)(chargeTenthsMah & 0xFFFFU));
+                } else if (fields[CAPACITY].available) {
+                    srxl2Frames.voltCurrentCap.chargeUsed_A = 0;
+                } else {
+                    srxl2Frames.voltCurrentCap.chargeUsed_A = 0xFFFF;
                 }
-                srxl2Frames.lipoMon.cell2  = swapBinary(tempU16);
-                if (fields[ADS_1_3].available && fields[ADS_1_3].value >= 0) {
-                    tempU16 = (uint16_t) (int_round( fields[ADS_1_3].value ,  10));   
-                } else { 
-                    tempU16 = 0x7FFF ; //		7FFF-> no data 
+
+                if (fields[MVOLT].available && fields[MVOLT].value >= 0) {
+                    // oXs MVOLT is mV; Spektrum uses 0.01V = 10mV.
+                    tempU16 = (uint16_t) int_round(fields[MVOLT].value, 10);
+                    srxl2Frames.voltCurrentCap.volts_A = swapBinary(tempU16);
+                } else {
+                    srxl2Frames.voltCurrentCap.volts_A = 0xFFFF;
                 }
-                srxl2Frames.lipoMon.cell3  = swapBinary(tempU16);
-                if (fields[ADS_1_4].available && fields[ADS_1_4].value >= 0) {
-                    tempU16 = (uint16_t) (int_round( fields[ADS_1_4].value ,  10));   
-                } else { 
-                    tempU16 = 0x7FFF ; //		7FFF-> no data 
-                }
-                srxl2Frames.lipoMon.cell4  = swapBinary(tempU16);
-                srxl2Frames.lipoMon.cell5  = 0XFF7F ; // swap included
-                srxl2Frames.lipoMon.cell6  = 0XFF7F;
-                srxl2Frames.lipoMon.temp  = 0XFF7F;
+
+                srxl2Frames.voltCurrentCap.current_B = 0xFF7F;
+                srxl2Frames.voltCurrentCap.chargeUsed_B = 0xFFFF;
+                srxl2Frames.voltCurrentCap.volts_B = 0xFFFF;
+                srxl2Frames.voltCurrentCap.alerts = 0;
+                srxl2Frames.voltCurrentCap.highCharge =
+                    (uint8_t)((chargeTenthsMah >> 16) & 0x0FU);
                 return true;
             }
             break;
+
+        case 7: // TELE_DEVICE_LIPOMON (0x3A)
+        {
+            // FVP/FVN: use the generic LiPo simulation from tools.cpp.
+            // SRXL2 LiPoMon supports 6 cells, so we send C1..C6 from the
+            // shared 8S simulation. No VFAS division and no ADS dependency.
+            const uint16_t *forcedCells = getForcedCellValues(forcedFields);
+            if (forcedCells != nullptr) {
+                srxl2Frames.lipoMon.identifier = TELE_DEVICE_LIPOMON;
+                srxl2Frames.lipoMon.sID = 0;
+                srxl2Frames.lipoMon.cell1 = swapBinary((uint16_t)((forcedCells[0] + 5U) / 10U));
+                srxl2Frames.lipoMon.cell2 = swapBinary((uint16_t)((forcedCells[1] + 5U) / 10U));
+                srxl2Frames.lipoMon.cell3 = swapBinary((uint16_t)((forcedCells[2] + 5U) / 10U));
+                srxl2Frames.lipoMon.cell4 = swapBinary((uint16_t)((forcedCells[3] + 5U) / 10U));
+                srxl2Frames.lipoMon.cell5 = swapBinary((uint16_t)((forcedCells[4] + 5U) / 10U));
+                srxl2Frames.lipoMon.cell6 = swapBinary((uint16_t)((forcedCells[5] + 5U) / 10U));
+                srxl2Frames.lipoMon.temp = 0XFF7F;
+                return true;
+            }
+
+            // Normal mode: keep the existing ADS-based LiPo monitor behavior.
+            if (fields[ADS_1_1].available || fields[ADS_1_2].available ||
+                fields[ADS_1_3].available || fields[ADS_1_4].available) {
+                srxl2Frames.lipoMon.identifier = TELE_DEVICE_LIPOMON;
+                srxl2Frames.lipoMon.sID = 0;
+
+                if (fields[ADS_1_1].available && fields[ADS_1_1].value >= 0)
+                    tempU16 = (uint16_t) int_round(fields[ADS_1_1].value, 10);
+                else
+                    tempU16 = 0x7FFF;
+                srxl2Frames.lipoMon.cell1 = swapBinary(tempU16);
+
+                if (fields[ADS_1_2].available && fields[ADS_1_2].value >= 0)
+                    tempU16 = (uint16_t) int_round(fields[ADS_1_2].value, 10);
+                else
+                    tempU16 = 0x7FFF;
+                srxl2Frames.lipoMon.cell2 = swapBinary(tempU16);
+
+                if (fields[ADS_1_3].available && fields[ADS_1_3].value >= 0)
+                    tempU16 = (uint16_t) int_round(fields[ADS_1_3].value, 10);
+                else
+                    tempU16 = 0x7FFF;
+                srxl2Frames.lipoMon.cell3 = swapBinary(tempU16);
+
+                if (fields[ADS_1_4].available && fields[ADS_1_4].value >= 0)
+                    tempU16 = (uint16_t) int_round(fields[ADS_1_4].value, 10);
+                else
+                    tempU16 = 0x7FFF;
+                srxl2Frames.lipoMon.cell4 = swapBinary(tempU16);
+
+                srxl2Frames.lipoMon.cell5 = 0XFF7F;
+                srxl2Frames.lipoMon.cell6 = 0XFF7F;
+                srxl2Frames.lipoMon.temp = 0XFF7F;
+                return true;
+            }
+            break;
+        }
         default:
             return false;
             break;    
@@ -1049,7 +1100,13 @@ void srxl2SendFrame(uint8_t length){  // srxl2TxBuffer is already filled (includ
     dma_channel_set_trans_count (srxl2_dma_chan, length , true) ;  // start with the right length
     // we need a way to set the pio back in receive mode when all bytes are sent 
     // this will be done in the main loop after some ms (here 2ms)
-    restoreSrxl2PioToReceiveMicros = microsRp() + 3000; //(uint32_t) (1000000.0 * 10.0 * length / srxl2CurrentBaudrate);   
+    // 8N1 = 10 bits per byte. Release the single-wire bus shortly
+    // after the real frame duration instead of holding TX for 3 ms.
+    const uint32_t baud = srxl2CurrentBaudrate ? srxl2CurrentBaudrate
+                                               : SRXL2_PORT_BAUDRATE_DEFAULT;
+    const uint32_t txDurationUs =
+        (((uint32_t)length * 10UL * 1000000UL) + baud - 1UL) / baud;
+    restoreSrxl2PioToReceiveMicros = microsRp() + txDurationUs + 120UL;
 }
 
 

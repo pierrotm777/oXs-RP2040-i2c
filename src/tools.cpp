@@ -307,6 +307,22 @@ int32_t negFieldValues[] = {
     -89012
         
 };
+// Generic 8S LiPo simulation shared by telemetry protocols.
+// These are individual cell voltages in mV and are independent from VFAS/ADS.
+static const uint16_t forcedCellValuesPos[FORCED_CELL_COUNT] = {
+    4200, 4180, 4160, 4140, 4120, 4100, 4080, 4060
+};
+
+static const uint16_t forcedCellValuesNeg[FORCED_CELL_COUNT] = {
+    3200, 3180, 3160, 3140, 3120, 3100, 3080, 3060
+};
+
+const uint16_t * getForcedCellValues(uint8_t forcedFields) {
+    if (forcedFields == 1 || forcedFields == 'P') return forcedCellValuesPos; // FVP
+    if (forcedFields == 2 || forcedFields == 'N') return forcedCellValuesNeg; // FVN
+    return nullptr;
+}
+
 // fill all fields with dummy values (useful to test a protocol)
 void fillFields( uint8_t forcedFields){
     // FVP: force all fields, just as FVN does. Reapplied from main.cpp

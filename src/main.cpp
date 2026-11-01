@@ -418,18 +418,22 @@ void setup() {
   //bool clockChanged; 
   //clockChanged = set_sys_clock_khz(133000, false);
   set_sys_clock_khz(133000, false);
+  // Read the protocol first so X-Bus alone can skip the USB startup delay.
+  setupConfig(); // retrieve the config parameters (crsf baudrate, voltage scale & offset, type of gps, failsafe settings)
   #ifdef DEBUG
-  uint16_t counter = 10;                      // after an upload, watchdog_cause_reboot is true.
-  //if ( watchdog_caused_reboot() ) counter = 0; // avoid the UDC wait time when reboot is caused by the watchdog   
-  while ( (!tud_cdc_connected()) && (counter--)) { 
-  //while ( (!tud_cdc_connected()) ) { 
-    sleep_ms(100);
-    //toggleRgb();
+  if (config.protocol != 'X') { // keep the existing USB startup delay for all other protocols
+    uint16_t counter = 10;                      // after an upload, watchdog_cause_reboot is true.
+    //if ( watchdog_caused_reboot() ) counter = 0; // avoid the UDC wait time when reboot is caused by the watchdog   
+    while ( (!tud_cdc_connected()) && (counter--)) { 
+    //while ( (!tud_cdc_connected()) ) { 
+      sleep_ms(100);
+      //toggleRgb();
     }
-  sleep_ms(2000);  // in debug mode, wait a little to let USB on PC be able to display all messages
-  uint8_t a1[2] = {1, 2};
-  int debug = 2;
-  debugAX("aa", a1 , 2);
+    sleep_ms(2000);  // in debug mode, wait a little to let USB on PC be able to display all messages
+    uint8_t a1[2] = {1, 2};
+    int debug = 2;
+    debugAX("aa", a1 , 2);
+  }
   #endif
   
   if (watchdog_caused_reboot()) {
@@ -440,7 +444,6 @@ void setup() {
         calibrateImuGyro = true;
         //sleep_ms(1000); // wait that GPS is initialized
     }
-  setupConfig(); // retrieve the config parameters (crsf baudrate, voltage scale & offset, type of gps, failsafe settings)  
   setupSequencers(); // retrieve the sequencer parameters (defsMax, stepsMax, defs and steps)
   setupGyroMixer(); 
   checkConfigAndSequencers();     // check if config and sequencers are valid (print error message; configIsValid is set on true or false)
@@ -465,6 +468,9 @@ void setup() {
       }  
       queue_init(&qSensorData, sizeof(queue_entry_t) , 50) ; // max 50 groups of 5 bytes.  create queue to get data from core1
       queue_init(&qSendCmdToCore1, 1, 10); // queue to send a cmd to core 1 (e.g. to perform a calibration of mp6050)
+      if (config.protocol == 'X') { // X-Bus: make the I2C slave ready before sensor discovery on core 1
+        setupXbusSpektrum();
+      }
       multicore_launch_core1(core1_main);// start core1 and so start I2C sensor discovery
       multicoreIsRunning = true; // to know if multicore is running or not
       uint32_t setup1StartUs = microsRp();  
@@ -525,8 +531,6 @@ void setup() {
       } else if (config.protocol == 'R') {   // Radiolink
         setupRlink();
         //printf("RadioLink : setup I2C desactive pour test\n");
-      } else if (config.protocol == 'X') {   // Spektrum Xbus
-        setupXbusSpektrum();
       } else if (config.protocol == 'T') {   // Hitec
         setupHitec();
       }

@@ -1,43 +1,7 @@
 # openXsensor (oXs) on RP2040 board
-This oXs version is a fork from the [oXs RP2040 project by mstrens](https://github.com/mstrens/oXs_on_RP2040/tree/test)  
-My [last PCB v1.2](https://github.com/pierrotm777/oXs_RP2040_Gps_Baro_Acc_Gyro/tree/main/V1.2) can use this new version.  
-![](oXsRP2040Full_I2C.png)  
-```text
-Rf protocol   PROTOCOL= Y      Y is S(Sport Frsky), F(Fbus Frsky), B(HUB Frsky), C(CRSF/ELRS), H(Hott), M(Mpx)
-                               2(Sbus2 Futaba), J(Jeti), E(jeti Exbus), L (spektrum SRXL2), I(IBus/Flysky)
-                               R(Rlink), T(Hitec) or X(Xbus)
-```											   
-```text
-Version = 3.0.11 & I2C 
-    Function                GPIO  Change entering XXX=yyy (yyy=255 to disable)
-Primary channels input    =    9  (PRI     = 1, 5, **9**, 13 (for SCL0) )
-Telemetry . . . . . . . . =    8  (TLM     = 0, 4, **8**, 12 (for SDA0) )
-```
-> [!NOTE]  
-> This PCB use:  
-> ```text
-> Version = 3.0.11 & I2C  
->     Function                GPIO  Change entering XXX=yyy (yyy=255 to disable)  
-> Primary channels input    =    9  (PRI     = 1, 5, 9, 13 (for SCL0) )  
-> Secondary channels input  =  255  (SEC     = 1, 13, 17, 29)  
-> Telemetry . . . . . . . . =    8  (TLM     = 0, 4, 8, 12 (for SDA0) )  
-> GPS Rx  . . . . . . . . . =   13  (GPS_RX  = 0, 1, 2, ..., 29)  
-> GPS Tx  . . . . . . . . . =   12  (GPS_TX  = 0, 1, 2, ..., 29)  
-> Sbus OUT  . . . . . . . . =  255  (SBUS_OUT= 0, 1, 2, ..., 29)  
-> RPM   . . . . . . . . . . =   15  (RPM     = 0, 1, 2, ..., 29)  
-> SDA (I2C sensors) . . . . =   10  (SDA     = 2, 6, 10, 14, 18, 22, 26)  
-> SCL (I2C sensors) . . . . =   11  (SCL     = 3, 7, 11, 15, 19, 23, 27)  
-> PWM Channels 1, 2, 3 ,4   =  255  255  255  255 (C1 / C16= 0, 1, 2, ..., 15)  
-> PWM Channels 5, 6, 7 ,8   =  255  255  255  255  
-> PWM Channels 9,10,11,12   =  255  255  255  255  
-> PWM Channels 13,14,15,16  =  255  255  255  255  
-> Voltage 1, 2, 3, 4        =   26   27   28   29 (V1 / V4 = 26, 27, 28, 29)  
-> RGB led . . . . . . . . . =   16  (RGB    = 0, 1, 2, ..., 29)  
-> ```
+## For rc protocols : expressLRS / FRSKY (sport + Fbus) / HOTT / JETI Ex / JETI EXBUS/ MPX / FLYSKY / Futaba (SBUS2) / Spektrum (SRXL2) 
 
-## For rc protocols : expressLRS / FRSKY (sport + Fbus) / HOTT / JETI Ex / JETI EXBUS/ MPX / FLYSKY / Futaba (SBUS2) / Spektrum (SRXL2) / Spektrum (XBUS) / Radiolink / Hitec
-
-This project can be interfaced with 1 or 2 ELRS, FRSKY , HOTT , MPX, FLYSKY , Futaba, Spektrum(Srxl2), Jeti receiver(s), Radiolink, Spektrum(Xbus), Hitec (protocol has to be selected accordingly).
+This project can be interfaced with 1 or 2 ELRS, FRSKY , HOTT , MPX, FLYSKY , Futaba, Spektrum or Jeti receiver(s) (protocol has to be selected accordingly).
  
 ### This project is foreseen to generate:
 - telemetry data (e.g. when a flight controller is not used)
@@ -88,6 +52,9 @@ Each function (telemetry/PWM/SBUS/gyro/logger/sequencer/localisation) can be use
 
 
 Note: when a mpu6050 is used (to improve vario reactivity, stabilize the plane and/or a camera), it is important to calibrate the mp6050 horizontally and vertically (see section below)
+
+[![](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/donate/?hosted_button_id=4T3KNNJ58J3B4)
+
 
 ## -------  Hardware -----------------
 
@@ -148,9 +115,6 @@ Depending on the protocol, the pins used for PRIMARY/SECONDARY RC Channels and f
 | I(Flysky Ibus) |    (Sbus from Rx1)         |     (Sbus from Rx2)     | ( Ibus from RX1 or Rx2)|   (1)  |
 | L(Spektrum Srxl2)|  Srxl from Rx1           |     Not used            | Not used               |   (2)  |
 | 2(Futaba Sbus2) |   Sbus2 from Rx1          |     (Sbus2 from Rx2)    | Sbus2 from Rx1 via 1Kohm | (3)  |
-| T(Hitec)       |    I2C SCL (pullup 1k to 3.3v|  Not used            | I2C SDA (pullup 1k to 3.3v)|      |
-| R(Radiolink)   |    I2C SCL (pullup 1k to 3.3v|  Not used            | I2C SDA (pullup 1k to 3.3v)|  (4) |
-| X(Spektrum Xbus)   |    I2C SCL (no pullup needed)|  Not used         | I2C SDA (no pullup needed)|     |
 
 Note: pins between () means that they are optional.
 
@@ -160,7 +124,6 @@ Note: pins between () means that they are optional.
 
 (3) For Futaba, TLM pin must be equal to PRI pin - 1 and insert 1 kOhm resistor between PRI and TLM
 
-(4) Radiolink isn't actually tested, try in first without pullup.
 
 Up to 16 PWM signals can be generated on pin gpio 0...15 (to select in setup parameters). 
 
@@ -206,6 +169,7 @@ Note: pin 16 is reserved for an internal LED on RP2040-zero or RP2040-TINY and s
 |SBUS_OUT = 0/29           |Sbus output|  
 |TLM = 0/29                |telemetry data (! for futaba Sbus2, this pin must be equal to PRI pin - 1)|  
 |V1= 26/29 ... V4= 26/29 |voltage (or current/temperatue) measurements |  
+
 |RPM = 0/29                     | RPM|
 |LED = 16                       | internal led of RP2040-zero or RP2040-TINY|  
 |LOG = 0/29                     | data to be logged |  
@@ -217,14 +181,7 @@ Note: pin 16 is reserved for an internal LED on RP2040-zero or RP2040-TINY and s
 |SPI_BUSY = 0/29                | Busy pin from E220-900M22S  (locator)|
 |HIGH = 0/29                    | set the voltage level to 3V; can be used as Vcc for some sensors|
 |LOW = 0/29                     | set the voltage level to 0V; can be used as Ground for some sensors|
-|SDA = 2, 6, 10, 14, 18, 22, 26 | baro sensor, gyro, ads1115, ...|
-|SCL = 3, 7, 11, 15, 19, 23, 27 | baro sensor, gyro, ads1115, ...|
 
-**I2C ONLY**
-|Command|used for:|
-|----|----|
-|PRI = 1, 5, 9, 13 |for SCL0|
-|TLM = 0, 4, 8, 12 |for SDA0|
 
 ## --------- Software -------------------
 This software has been developped using the RP2040 SDK provided by Rapsberry.

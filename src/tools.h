@@ -121,6 +121,12 @@ void calculateAirspeed();
 
 void fillFields( uint8_t forcedFields);
 
+// Generic LiPo cell simulation used by telemetry protocols in FVP/FVN.
+// Returns 8 individual cell voltages in mV for forcedFields 1 (FVP)
+// or 2 (FVN). Returns nullptr when forced simulation is inactive.
+#define FORCED_CELL_COUNT 8
+const uint16_t * getForcedCellValues(uint8_t forcedFields);
+
 uint16_t swapBinary(uint16_t value) ;
 
 int16_t swapBinary(int16_t value) ;
