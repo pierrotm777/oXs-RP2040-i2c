@@ -317,9 +317,96 @@ static const uint16_t forcedCellValuesNeg[FORCED_CELL_COUNT] = {
     3200, 3180, 3160, 3140, 3120, 3100, 3080, 3060
 };
 
+// FVSWEEP: stepped test values with independent timers.
+// Each telemetry family advances independently so changes are easy to see.
+//
+// VFAS : 10 values, one step every 2500 ms
+// Curr : 10 values, one step every 1800 ms
+// Cells: 10 values, one step every 3500 ms
+//
+// The 8 cells use the same base step with a small offset between cells.
+// HoTT/OpenAVRc currently exposes C1..C6, but C7/C8 remain available
+// for protocols that can transport them.
+
+static uint16_t forcedCellValuesSweep[FORCED_CELL_COUNT] = {
+    3200, 3180, 3160, 3140, 3120, 3100, 3080, 3060
+};
+
+static const uint16_t fvSweepVfasMv[] = {
+    12000, 14000, 16000, 18000, 20000,
+    22000, 24000, 26000, 28000, 30000
+};
+
+static const uint16_t fvSweepCurrentMa[] = {
+        0,  2000,  4000,  6000,  8000,
+    10000, 12000, 14000, 16000, 18000
+};
+
+static const uint16_t fvSweepCellBaseMv[] = {
+    3200, 3300, 3400, 3500, 3600,
+    3700, 3800, 3900, 4000, 4100
+};
+
+static void updateForcedSweepValues() {
+    static uint32_t lastVfasMs = 0;
+    static uint32_t lastCurrentMs = 0;
+    static uint32_t lastCellsMs = 0;
+
+    static uint8_t vfasIndex = 0;
+    static uint8_t currentIndex = 0;
+    static uint8_t cellsIndex = 0;
+
+    const uint32_t now = millisRp();
+
+    // ----- VFAS -----
+    if ((uint32_t)(now - lastVfasMs) >= 2500UL) {
+        lastVfasMs = now;
+        vfasIndex++;
+        if (vfasIndex >= (sizeof(fvSweepVfasMv) / sizeof(fvSweepVfasMv[0])))
+            vfasIndex = 0;
+    }
+
+    fields[MVOLT].value = fvSweepVfasMv[vfasIndex];
+    fields[MVOLT].available = true;
+    fields[MVOLT].onceAvailable = true;
+
+    // ----- CURRENT -----
+    if ((uint32_t)(now - lastCurrentMs) >= 1800UL) {
+        lastCurrentMs = now;
+        currentIndex++;
+        if (currentIndex >= (sizeof(fvSweepCurrentMa) / sizeof(fvSweepCurrentMa[0])))
+            currentIndex = 0;
+    }
+
+    fields[CURRENT].value = fvSweepCurrentMa[currentIndex];
+    fields[CURRENT].available = true;
+    fields[CURRENT].onceAvailable = true;
+
+    // ----- CELLS -----
+    if ((uint32_t)(now - lastCellsMs) >= 3500UL) {
+        lastCellsMs = now;
+        cellsIndex++;
+        if (cellsIndex >= (sizeof(fvSweepCellBaseMv) / sizeof(fvSweepCellBaseMv[0])))
+            cellsIndex = 0;
+    }
+
+    const uint16_t baseMv = fvSweepCellBaseMv[cellsIndex];
+
+    for (uint8_t i = 0; i < FORCED_CELL_COUNT; ++i) {
+        int32_t cellMv = (int32_t)baseMv - ((int32_t)i * 20);
+        if (cellMv < 3000) cellMv = 3000;
+        if (cellMv > 4200) cellMv = 4200;
+        forcedCellValuesSweep[i] = (uint16_t)cellMv;
+    }
+}
+
 const uint16_t * getForcedCellValues(uint8_t forcedFields) {
     if (forcedFields == 1 || forcedFields == 'P') return forcedCellValuesPos; // FVP
     if (forcedFields == 2 || forcedFields == 'N') return forcedCellValuesNeg; // FVN
+    if (forcedFields == 3 || forcedFields == 'S') {
+        updateForcedSweepValues();
+        return forcedCellValuesSweep; // FVSWEEP
+    }
     return nullptr;
 }
 
@@ -340,6 +427,9 @@ void fillFields( uint8_t forcedFields){
             fields[i].available = true;
             fields[i].onceAvailable = true; 
         }
+    }
+    if (forcedFields == 3) {    // FVSWEEP: VFAS + Curr + cells only
+        updateForcedSweepValues();
     }
 }
 

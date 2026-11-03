@@ -262,6 +262,7 @@ void printHelp(){
     printf("Testing                     FV                  Field Values (display all telemetry internal values)\n")  ;
     printf("                            FVP                 Field Values Positieve (force the tlm values to positieve dummy values\n")  ;
     printf("                            FVN                      idem with negatieve values\n")  ;
+    printf("                            FVSWEEP             Slowly sweep VFAS, Curr and simulated cell voltages\n")  ;
     printf("                            PWM                 Display the current PWM values (in micro sec)\n");
     printf("\n");
     printf("Display HELP                DEBUG=HELP          display Locateur or Esc commands to get some debug messages (up to next reset)\n");
@@ -797,6 +798,20 @@ int8_t handleOneCmd( char * bufferPos){ // handle one command with buffer starti
             printf("To get real values again, you have to power down\n");
             return 0;
     }
+    // slowly sweep VFAS, Curr and simulated cell voltages
+    if ( strcmp("FVSWEEP", pkey) == 0 ) {
+            forcedFields = 3;
+            fillFields(forcedFields);
+            if (config.protocol == 'E') setupExbusList(true); // rebuild the list of fields being sent in jeti exbus
+            if (config.protocol == 'J') initListOfJetiFields(true); // rebuild the list of fields being sent in jeti ex
+
+            printFieldValues();
+            printf("FVSWEEP started: VFAS, Curr and simulated cells vary slowly\n");
+            printf("Cycle = 60 s (30 s up + 30 s down)\n");
+            printf("To get real values again, you have to power down\n");
+            return 0;
+    }
+
     // print current values of all PWM fields
     if ( strcmp("PWM", pkey) == 0 ) { 
             printPwmValues();
