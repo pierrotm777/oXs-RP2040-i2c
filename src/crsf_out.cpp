@@ -16,6 +16,7 @@
 #include <string.h> // memcpy
 #include "param.h"
 #include <inttypes.h>
+#include <math.h>
 #include "mpu.h"
 
 // -----------------------------------------------------------------------------
@@ -26,11 +27,11 @@
 //   0x0D Temperature
 //   0x0E Voltage Group (ADS1115 #1)
 //   0x03 GPS UTC date/time (NEW: enables OpenAVRc RTC via CRSF -> S.Port)
-// Raw Accel/Gyro frame 0x13 is deliberately not scheduled here because current
-// EdgeTX does not expose it as standard telemetry sensors.
+// Raw Accel/Gyro frame 0x13 is also emitted so OpenAVRc can recover the
+// real ACC_X / ACC_Y / ACC_Z values directly from the standard CRSF frame.
 // -----------------------------------------------------------------------------
 
-#define FRAME_TYPES_MAX 11
+#define FRAME_TYPES_MAX 12
 
 // Existing indexes from crsf_frames.h remain 0..4.
 // Extra indexes are kept local so no change to crsf_frames.h is required.
@@ -40,6 +41,7 @@ static constexpr uint8_t OXS_CRSF_FRAMEIDX_TEMP     = 7;
 static constexpr uint8_t OXS_CRSF_FRAMEIDX_ADS1     = 8;
 static constexpr uint8_t OXS_CRSF_FRAMEIDX_GPS_TIME = 9;
 static constexpr uint8_t OXS_CRSF_FRAMEIDX_CELLS    = 10;
+static constexpr uint8_t OXS_CRSF_FRAMEIDX_ACCGYRO  = 11;
 
 // Current CRSF broadcast frame IDs.
 static constexpr uint8_t OXS_CRSF_FRAMETYPE_AIRSPEED = 0x0A;
@@ -47,6 +49,7 @@ static constexpr uint8_t OXS_CRSF_FRAMETYPE_RPM      = 0x0C;
 static constexpr uint8_t OXS_CRSF_FRAMETYPE_TEMP     = 0x0D;
 static constexpr uint8_t OXS_CRSF_FRAMETYPE_VOLTAGES = 0x0E;
 static constexpr uint8_t OXS_CRSF_FRAMETYPE_GPS_TIME = 0x03;
+static constexpr uint8_t OXS_CRSF_FRAMETYPE_ACCGYRO  = 0x13;
 
 // Intervals are local on purpose: no config.h change is needed for this test.
 static constexpr uint32_t OXS_AIRSPEED_FRAME_INTERVAL = 250;
@@ -55,6 +58,7 @@ static constexpr uint32_t OXS_TEMP_FRAME_INTERVAL     = 1000;
 static constexpr uint32_t OXS_ADS1_FRAME_INTERVAL     = 500;
 static constexpr uint32_t OXS_GPS_TIME_FRAME_INTERVAL = 1000;
 static constexpr uint32_t OXS_CELLS_FRAME_INTERVAL    = 1000;
+static constexpr uint32_t OXS_ACCGYRO_FRAME_INTERVAL  = 100;
 
 // source_id >= 129 means "general voltages" in CRSF 0x0E.
 // EdgeTX then exposes each 16-bit value as a separate voltage sensor.
@@ -68,6 +72,7 @@ extern CONFIG config;
 extern uint8_t debugTlm;
 extern MPU mpu;
 extern uint8_t forcedFields;
+extern const uint16_t * getForcedCellValues(uint8_t forcedFields);
 
 voltageFrameStruct voltageFrame;
 varioFrameStruct varioFrame;
@@ -95,11 +100,9 @@ static inline bool crsfForcedNegative() {
 }
 
 static inline bool crsfForcedFields() {
-    return crsfForcedPositive() || crsfForcedNegative();
+    return crsfForcedPositive() || crsfForcedNegative() || forcedFields == 4; // FVGPS
 }
 
-// FVP/FVN-only CRSF Cells simulation.
-// Cell values are provided by the generic telemetry helper in tools.cpp.
 
 static int32_t crsfClamp(int64_t v, int32_t lo, int32_t hi) {
     if (v < lo) return lo;
@@ -184,7 +187,7 @@ bool dataAvailable(uint8_t idx) {
 
         case CRSF_FRAMEIDX_GPS:
             // Normal operation still requires a real GPS.
-            // FVP/FVN can now exercise the CRSF GPS frame without one.
+            // FVP/FVN/FVGPS can exercise the CRSF GPS frame without one.
             return gps.gpsInstalled || crsfForcedFields();
 
         case CRSF_FRAMEIDX_BARO_ALTITUDE:
@@ -213,8 +216,12 @@ bool dataAvailable(uint8_t idx) {
                    fields[GPS_TIME].available && fields[GPS_DATE].onceAvailable;
 
         case OXS_CRSF_FRAMEIDX_CELLS:
-            // Never emit simulated cells in normal operation.
-            return crsfForcedFields();
+            return getForcedCellValues(forcedFields) != nullptr;
+
+        case OXS_CRSF_FRAMEIDX_ACCGYRO:
+            return fields[ACC_X].available ||
+                   fields[ACC_Y].available ||
+                   fields[ACC_Z].available;
     }
     return false;
 }
@@ -312,9 +319,26 @@ void fillFrameBaroAltitude(uint8_t idx) {
     fillBufferU8(CRSF_FRAME_BARO_ALTITUDE_PAYLOAD_SIZE + 2);
     fillBufferU8(CRSF_FRAMETYPE_BARO_ALTITUDE);
 
-    // Existing oXs representation: relative altitude cm -> dm + 10000 dm offset.
-    fillBufferI16(static_cast<int16_t>(
-        crsfClamp(fields[RELATIVEALT].value / 10 + 10000, 0, 32767)));
+    // CRSF 0x09:
+    //   bit15 = 0 : altitude in 0.1 m with +1000 m offset
+    //   bit15 = 1 : altitude directly in whole metres
+    //
+    // oXs RELATIVEALT is stored in centimetres.
+    const int32_t altitudeCm = fields[RELATIVEALT].value;
+    const int32_t altitudeDm = altitudeCm / 10;
+    const int32_t offsetDm = altitudeDm + 10000;
+    uint16_t rawAltitude;
+
+    if (offsetDm >= 0 && offsetDm < 0x8000) {
+        rawAltitude = static_cast<uint16_t>(offsetDm);
+    } else {
+        int32_t altitudeM = altitudeCm / 100;
+        if (altitudeM < 0) altitudeM = 0;
+        if (altitudeM > 0x7FFE) altitudeM = 0x7FFE;
+        rawAltitude = static_cast<uint16_t>(0x8000U | altitudeM);
+    }
+
+    fillBufferU16(rawAltitude);
 
     fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2],
                                    CRSF_FRAME_BARO_ALTITUDE_PAYLOAD_SIZE + 1));
@@ -331,24 +355,29 @@ void fillFrameAttitude(uint8_t idx) {
     fillBufferU8(CRSF_FRAME_ATTITUDE_PAYLOAD_SIZE + 2);
     fillBufferU8(CRSF_FRAMETYPE_ATTITUDE);
 
-    // oXs PITCH/ROLL/YAW: 0.01 degree.
-    // CRSF attitude: rad * 10000.
-    // factor = pi/180 * 100 = 1.745329...
+    // oXs PITCH/ROLL/YAW are stored in 0.01 degree.
+    // Standard CRSF attitude 0x1E expects signed int16 values in rad * 10000.
+    // Convert explicitly: degree -> rad -> CRSF integer.
+    constexpr float OXS_DEG_TO_CRSF_RAD = 0.01f * 0.01745329251994329577f * 10000.0f;
+
     const int16_t pitch = fields[PITCH].available
         ? static_cast<int16_t>(crsfClamp(
-              crsfRoundDiv(static_cast<int64_t>(fields[PITCH].value) * 17453, 10000),
+              static_cast<int32_t>(lroundf(static_cast<float>(fields[PITCH].value) *
+                                           OXS_DEG_TO_CRSF_RAD)),
               -32768, 32767))
         : 0;
 
     const int16_t roll = fields[ROLL].available
         ? static_cast<int16_t>(crsfClamp(
-              crsfRoundDiv(static_cast<int64_t>(fields[ROLL].value) * 17453, 10000),
+              static_cast<int32_t>(lroundf(static_cast<float>(fields[ROLL].value) *
+                                           OXS_DEG_TO_CRSF_RAD)),
               -32768, 32767))
         : 0;
 
     const int16_t yaw = fields[YAW].available
         ? static_cast<int16_t>(crsfClamp(
-              crsfRoundDiv(static_cast<int64_t>(fields[YAW].value) * 17453, 10000),
+              static_cast<int32_t>(lroundf(static_cast<float>(fields[YAW].value) *
+                                           OXS_DEG_TO_CRSF_RAD)),
               -32768, 32767))
         : 0;
 
@@ -356,8 +385,23 @@ void fillFrameAttitude(uint8_t idx) {
     fillBufferI16(roll);
     fillBufferI16(yaw);
 
+    if (debugTlm == 'Y') {
+        printf("ATT src=%ld/%ld/%ld deg100 raw=%d/%d/%d radx10000\n",
+               (long)fields[PITCH].value,
+               (long)fields[ROLL].value,
+               (long)fields[YAW].value,
+               (int)pitch, (int)roll, (int)yaw);
+    }
+
     fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2],
                                    CRSF_FRAME_ATTITUDE_PAYLOAD_SIZE + 1));
+
+    // Consume the attitude sample only after the complete CRSF 0x1E frame
+    // has been built. New MPU updates will set these flags again.
+    // This path is fully independent from CRSF 0x13 Accel/Gyro.
+    fields[PITCH].available = false;
+    fields[ROLL].available  = false;
+    fields[YAW].available   = false;
 
     crsfFrameNextMillis[idx] = millisRp() + ATTITUDE_FRAME_INTERVAL;
     crsfDebugFrame("Att");
@@ -559,15 +603,18 @@ static void fillFrameAds1(uint8_t idx) {
 }
 
 
+
+
+
 // CRSF 0x0E Cells: source_id 0 + 8 cell voltages in millivolts.
-// This frame exists only while FVP/FVN is active. EdgeTX supports up to
-// 8 cells from this frame. OpenAVRc intentionally keeps only the first 6.
+// Used only while FVP/FVN is active.
+// Values come from the generic Tools simulation.
 static void fillFrameCells(uint8_t idx) {
     const uint16_t *cells = getForcedCellValues(forcedFields);
     if (cells == nullptr) return;
 
     constexpr uint8_t cellCount = 8;
-    constexpr uint8_t payloadSize = 1 + cellCount * 2; // source_id + 8x uint16
+    constexpr uint8_t payloadSize = 1 + cellCount * 2;
 
     CRSFBufferLength = 0;
     fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
@@ -582,6 +629,60 @@ static void fillFrameCells(uint8_t idx) {
 
     crsfFrameNextMillis[idx] = millisRp() + OXS_CELLS_FRAME_INTERVAL;
     crsfDebugFrame(crsfForcedPositive() ? "Cells8 FVP" : "Cells8 FVN");
+    crsfStartDma();
+}
+
+// CRSF 0x13 Accel/Gyro.
+// Official CRSF scaling:
+//   acc raw = G * INT16_MAX / 16
+// oXs ACC_X/Y/Z are stored in 0.001 g, so:
+//   raw = milli_g * 32767 / 16000
+//
+// oXs does not currently expose matching raw gyro/temperature fields through
+// this CRSF output path, therefore those values are sent as zero. The three
+// accelerometer axes remain fully standard-compliant.
+static void fillFrameAccGyro(uint8_t idx) {
+    constexpr uint8_t payloadSize = 18;
+
+    const int16_t accX = static_cast<int16_t>(crsfClamp(
+        crsfRoundDiv(static_cast<int64_t>(fields[ACC_X].value) * 32767, 16000),
+        -32768, 32767));
+    const int16_t accY = static_cast<int16_t>(crsfClamp(
+        crsfRoundDiv(static_cast<int64_t>(fields[ACC_Y].value) * 32767, 16000),
+        -32768, 32767));
+    const int16_t accZ = static_cast<int16_t>(crsfClamp(
+        crsfRoundDiv(static_cast<int64_t>(fields[ACC_Z].value) * 32767, 16000),
+        -32768, 32767));
+
+    CRSFBufferLength = 0;
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(payloadSize + 2);
+    fillBufferU8(OXS_CRSF_FRAMETYPE_ACCGYRO);
+
+    // Timestamp in microseconds.
+    fillBufferI32(static_cast<int32_t>(millisRp() * 1000UL));
+
+    // Gyro X/Y/Z: not supplied by this oXs telemetry field set.
+    fillBufferI16(0);
+    fillBufferI16(0);
+    fillBufferI16(0);
+
+    // Real accelerometer axes.
+    fillBufferI16(accX);
+    fillBufferI16(accY);
+    fillBufferI16(accZ);
+
+    // Gyro temperature: unavailable here.
+    fillBufferI16(0);
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2], payloadSize + 1));
+
+    fields[ACC_X].available = false;
+    fields[ACC_Y].available = false;
+    fields[ACC_Z].available = false;
+
+    crsfFrameNextMillis[idx] = millisRp() + OXS_ACCGYRO_FRAME_INTERVAL;
+    crsfDebugFrame("AccGyro");
     crsfStartDma();
 }
 
@@ -629,6 +730,10 @@ void fillOneFrame(uint8_t idx) {
 
         case OXS_CRSF_FRAMEIDX_CELLS:
             fillFrameCells(idx);
+            break;
+
+        case OXS_CRSF_FRAMEIDX_ACCGYRO:
+            fillFrameAccGyro(idx);
             break;
     }
 }

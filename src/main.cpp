@@ -629,7 +629,7 @@ void getSensorsFromCore1(){
             }    
         }
     }
-    if ((forcedFields == 1) || (forcedFields == 2)) fillFields(forcedFields); // force dummy values for debuging a protocol
+    if (forcedFields != 0) fillFields(forcedFields); // force/sweep dummy values for debuging a protocol
 }
 /*
 void printTest(int testVal){

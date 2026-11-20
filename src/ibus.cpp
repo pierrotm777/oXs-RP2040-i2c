@@ -30,7 +30,7 @@
 
 // Rx sent on uart (115200 baud 8N1 not inverted) a frame of 4 char 
 // When the second char is 0x8y (starting with 0X81) , it means that the RX ask if sensor y exist.
-//    When sensor exits, oXs must reply after a delay of 100 usec, sending back the same char
+//    When sensor exists, oXs must reply after a delay of 100 usec, sending back the same char
 //    Note : when oXs replies to a 0X8y cmd, Rx send only a cmd 0X9y as long it does not get a reply to his 0x9y cmd
 //           so the receiver does not skip to next adr or to 0xAy commands 
 // When the second char is 0x9y, it means that the sensor is asking the type of sensor.
@@ -42,7 +42,7 @@
 //           - 5/6 = checksum
 // When the second char is 0xAy, it means that oXs has to send a frame with the value
 //    oXs must reply with a frame of 6 or 8 bytes
-//           - lentgh of the frame (6 or 8)
+//           - length of the frame (6 or 8)
 //           - 0XAy (as received)
 //           - value (in 2 or 4 bytes)
 //           - checksum
@@ -64,7 +64,7 @@ uint ibusOffsetRx ;
 int ibus_dma_chan;
 dma_channel_config ibusDmaConfig;
 
-uint8_t ibusTxBuffer[8];
+uint8_t ibusTxBuffer[20];
 
 enum IBUSSTATES {
     RECEIVING,
@@ -89,9 +89,20 @@ extern GPS gps;
 extern CONFIG config;
 extern ADS1115 adc1 ;     // class to handle first ads1115 (adr pin connected to grnd)
 extern ADS1115 adc2 ;     // class to handle second ads1115 (adr pin connected to vdd)
+extern uint8_t forcedFields; // FVP/FVN/FVPOWER simulation state
+const uint16_t * getForcedCellValues(uint8_t forcedFields);
 
 
 #define IBUS_BAUDRATE 115200
+
+// Internal pseudo-fields used only by the oXs iBUS dispatcher.
+// The sensor IDs sent on the bus remain the native AFHDS2A IDs used by EdgeTX.
+#define IBUS_OXS_GPS_FULL_FIELD  0xD0U
+#define IBUS_OXS_VOLT_FULL_FIELD 0xD1U
+#define IBUS_OXS_ACC_FULL_FIELD  0xD2U
+#define IBUS_OXS_CELL0_DUMMY     0xDFU
+#define IBUS_OXS_CELL1_FIELD     0xE0U
+#define IBUS_OXS_CELL6_FIELD     (IBUS_OXS_CELL1_FIELD + 5U)
 
 uint8_t ibusTypes[NUMBER_MAX_IDX] = {  // list of ibus type in the same sequence as fieldId 
       IBUS_SENSOR_TYPE_GPS_LAT,    // GPS LATITUDE ,  //   GPS special format
@@ -138,9 +149,9 @@ uint8_t ibusTypes[NUMBER_MAX_IDX] = {  // list of ibus type in the same sequence
       
       IBUS_SENSOR_TYPE_UNKNOWN,      //SBUS_FAILSAFE_COUNTER,
       IBUS_SENSOR_TYPE_UNKNOWN,      // GPS CUMULATIVE DISTANCE,      
-      IBUS_SENSOR_TYPE_UNKNOWN,      // ACC_X 
-      IBUS_SENSOR_TYPE_UNKNOWN,      // ACC_Y
-      IBUS_SENSOR_TYPE_UNKNOWN,      // ACC_Z
+      IBUS_SENSOR_TYPE_ACC_X,        // ACC_X, m/s2 * 100
+      IBUS_SENSOR_TYPE_ACC_Y,        // ACC_Y, m/s2 * 100
+      IBUS_SENSOR_TYPE_ACC_Z,        // ACC_Z, m/s2 * 100
 
       IBUS_SENSOR_TYPE_UNKNOWN,      //RESERVE3
       IBUS_SENSOR_TYPE_UNKNOWN,      //RESERVE4
@@ -192,94 +203,185 @@ void addToIbus(uint8_t idx){
 }
 
 void setupListIbusFieldsToReply() {  // fill an array with the list of fields (field ID) that are defined
-    listOfIbusFields[0] = 0 ;
-    maxIbusFieldsIdx = 0 ; // 0 
-    /*
-      LATITUDE =0,  //  IBUS_SENSOR_TYPE_GPS_LAT GPS special format
-      LONGITUDE,    //  IBUS_SENSOR_TYPE_GPS_LON GPS special format
-      GROUNDSPEED , //  IBUS_SENSOR_TYPE_GROUND_SPEED GPS cm/s
-      HEADING,      //  IBUS_SENSOR_TYPE_COG  GPS 0.01 degree
-      ALTITUDE ,    //  IBUS_SENSOR_TYPE_GPS_ALT GPS cm
+    // EdgeTX-native AFHDS2A layout.
+    // Address 0 is kept as a harmless 0x04 placeholder because some receivers
+    // treat instance 0 specially. OpenAVRc ignores cell instance 0.
+    listOfIbusFields[0] = IBUS_OXS_CELL0_DUMMY;
+    maxIbusFieldsIdx = 0;
 
-      NUMSAT ,      //  IBUS_SENSOR_TYPE_GPS_STATUS  GPS no unit   
-      GPS_DATE ,    //  ?????????????? GPS special format AAMMJJFF
-      GPS_TIME ,    //  ?????????????? GPS special format HHMMSS00
-      GPS_PDOP ,    //  ?????????????? GPS no unit
-      GPS_HOME_BEARING, // IBUS_SENSOR_TYPE_CMP_HEAD  GPS degree
+    // Native extended AFHDS2A groups used by EdgeTX.
+    addToIbus(IBUS_OXS_GPS_FULL_FIELD);   // address 1: 0xFD GPS_FULL
+    addToIbus(IBUS_OXS_VOLT_FULL_FIELD);  // address 2: 0xF0 VOLT_FULL
+    addToIbus(IBUS_OXS_ACC_FULL_FIELD);   // address 3: 0xEF ACC_FULL
 
-      GPS_HOME_DISTANCE, // IBUS_SENSOR_TYPE_GPS_DIST  GPS  in m
-      MVOLT,             // IBUS_SENSOR_TYPE_BAT_CURR   volt1   in mVolt
-      CURRENT,           // IBUS_SENSOR_TYPE_BAT_CURR  volt2 must be in seq for voltage.cpp in mA (mV)
-      RESERVE1, //  ???? volt3 must be in seq for voltage.cpp in mV
-      RESERVE2, //  ???? volt4 must be in seq for voltage.cpp in mV
-      
-      CAPACITY,    // IBUS_SENSOR_TYPE_FUEL    based on current (volt2) in mAh
-      TEMP1,       // IBUS_SENSOR_TYPE_TEMPERATURE = Volt3 but saved as temp in degree
-      TEMP2,       // IBUS_SENSOR_TYPE_TEMPERATURE =  Volt4 but saved as temp in degree
-      VSPEED,      //  IBUS_SENSOR_TYPE_CLIMB_RATE   baro       in cm/s
-      RELATIVEALT , // IBUS_SENSOR_TYPE_ALT      baro      in cm
-      
-      PITCH,       // IBUS_SENSOR_TYPE_PITCH     imu        in degree 
-      ROLL,        // IBUS_SENSOR_TYPE_ROLL      imu           in degree
-      YAW ,        // not used to save data  in degree
-      RPM ,        // IBUS_SENSOR_TYPE_RPM     RPM sensor    in rpm
-      ADS_1_1,      // Voltage provided by ads1115 nr 1 on pin 1
+    // Six individual cells remain six standard AFHDS2A 0x04 sensors.
+    for (uint8_t i = 0; i < 6; ++i) {
+        addToIbus(IBUS_OXS_CELL1_FIELD + i); // addresses 4..9
+    }
 
-      ADS_1_2,      // Voltage provided by ads1115 nr 1 on pin 2    25
-      ADS_1_3,      // Voltage provided by ads1115 nr 1 on pin 3
-      ADS_1_4,      // Voltage provided by ads1115 nr 1 on pin 4
-      ADS_2_1,      // Voltage provided by ads1115 nr 2 on pin 1
-      ADS_2_2,      // Voltage provided by ads1115 nr 2 on pin 2
-      
-      ADS_2_3,      // Voltage provided by ads1115 nr 2 on pin 3    30
-      ADS_2_4,      // Voltage provided by ads1115 nr 2 on pin 4
-    
-    */
-    if ( config.pinVolt[0] != 255 || config.pinEsc !=255 )  {
-        addToIbus(MVOLT) ;
-    }
-    if ( config.pinVolt[1] != 255 || config.pinEsc !=255 ) {
-        addToIbus(CURRENT) ;
-        addToIbus(CAPACITY) ;
-    } 
-    if ( (( config.pinVolt[2] != 255)  && (config.temperature == 1 or  config.temperature == 2)) || config.pinEsc !=255 ) {
-        addToIbus(TEMP1) ;
-    } 
-    if ( (( config.pinVolt[3] != 255)  && (config.temperature == 2) )  || \
-               ( (config.pinEsc !=255 ) && (config.escType != BLH) )  ) {
-        addToIbus(TEMP2) ;
-    } 
-    // here we could add other voltage parameter (current, ...)
-    if ( baro1.baroInstalled || baro2.baroInstalled || baro3.baroInstalled) {
-        addToIbus(RELATIVEALT) ; 
-        addToIbus(VSPEED) ;
-    }
-    if ( config.pinRpm != 255  || config.pinEsc !=255 ) {
-        addToIbus(RPM) ;
-    } 
-    if ( config.pinGpsTx != 255 ) {
-        addToIbus(LONGITUDE) ;
-        addToIbus(LATITUDE) ;
-        addToIbus(NUMSAT) ;
-        addToIbus(GROUNDSPEED) ;
-        addToIbus(HEADING) ;
-        addToIbus(ALTITUDE) ;    
-    }
-    if (adc1.adsInstalled) {
-        addToIbus(ADS_1_1) ;
-        addToIbus(ADS_1_2) ;
-        addToIbus(ADS_1_3) ;
-        addToIbus(ADS_1_4) ;
-    }
+    // Remaining native scalar AFHDS2A sensors.
+    addToIbus(TEMP1);       // address 10 -> 0x01
+    addToIbus(TEMP2);       // address 11 -> 0x01
+    addToIbus(GROUNDSPEED); // address 12 -> 0x13, m/s * 100
+    addToIbus(HEADING);     // address 13 -> 0x0A, deg * 100
+    addToIbus(VSPEED);      // address 14 -> 0x09
+    addToIbus(GPS_HOME_DISTANCE); // address 15 -> 0x14
+
     #ifdef DEBUG
     printf("List of ibus fields : ");
     for (uint8_t i = 0; i<= maxIbusFieldsIdx ; i++){
         printf(" %d ", listOfIbusFields[i]);
     }
     printf("\n");
-    #endif 
+    #endif
 }
 
+static void ibusPutU16(uint8_t *dst, uint16_t value)
+{
+    dst[0] = (uint8_t)value;
+    dst[1] = (uint8_t)(value >> 8);
+}
+
+static void ibusPutS16(uint8_t *dst, int16_t value)
+{
+    ibusPutU16(dst, (uint16_t)value);
+}
+
+static void ibusPutS32(uint8_t *dst, int32_t value)
+{
+    dst[0] = (uint8_t)value;
+    dst[1] = (uint8_t)(value >> 8);
+    dst[2] = (uint8_t)(value >> 16);
+    dst[3] = (uint8_t)(value >> 24);
+}
+
+static int16_t ibusAccelFromOxs(int32_t milliG)
+{
+    // oXs acceleration is 0.001 g. AFHDS2A/EdgeTX uses m/s2 * 100.
+    int32_t value = (milliG * 981L) / 1000L;
+    if (value > 32767L) value = 32767L;
+    if (value < -32768L) value = -32768L;
+    return (int16_t)value;
+}
+
+static uint16_t ibusCellCentivolts(uint8_t cellIdx)
+{
+    uint16_t cellMv = 0;
+    const uint16_t *forcedCells = getForcedCellValues(forcedFields);
+    if (forcedCells != nullptr) {
+        cellMv = forcedCells[cellIdx];
+    } else if (cellIdx < 4U && fields[ADS_1_1 + cellIdx].available) {
+        cellMv = (uint16_t)fields[ADS_1_1 + cellIdx].value;
+    } else if (cellIdx >= 4U && fields[ADS_2_1 + (cellIdx - 4U)].available) {
+        cellMv = (uint16_t)fields[ADS_2_1 + (cellIdx - 4U)].value;
+    }
+    return (cellMv + 5U) / 10U;
+}
+
+static void formatIbusExtendedPayload(uint8_t fieldId, uint8_t *payload)
+{
+    if (fieldId == IBUS_OXS_GPS_FULL_FIELD) {
+        // EdgeTX: [fix][sats][LAT x4][LON x4][ALT x4].
+        const uint8_t sats = fields[NUMSAT].available ? (uint8_t)fields[NUMSAT].value : 0U;
+        payload[0] = (sats >= 4U) ? 3U : 0U;
+        payload[1] = sats;
+        ibusPutS32(payload + 2,  fields[LATITUDE].available  ? fields[LATITUDE].value  : 0);
+        ibusPutS32(payload + 6,  fields[LONGITUDE].available ? fields[LONGITUDE].value : 0);
+        ibusPutS32(payload + 10, fields[ALTITUDE].available  ? fields[ALTITUDE].value  : 0);
+        return;
+    }
+
+    if (fieldId == IBUS_OXS_VOLT_FULL_FIELD) {
+        // EdgeTX expands 0xF0 into IDs 0x03..0x07, five 16-bit values.
+        uint16_t extV = fields[MVOLT].available ? (uint16_t)int_round(fields[MVOLT].value, 10) : 0U;
+        uint16_t cellAvg = 0U;
+        uint32_t cellSum = 0U;
+        uint8_t cellCount = 0U;
+        for (uint8_t i = 0; i < 6U; ++i) {
+            uint16_t cv = ibusCellCentivolts(i);
+            if (cv) { cellSum += cv; ++cellCount; }
+        }
+        if (cellCount) cellAvg = (uint16_t)(cellSum / cellCount);
+        int32_t curr = fields[CURRENT].available ? int_round(fields[CURRENT].value, 10) : 0;
+        if (curr < 0) curr = 0;
+        uint16_t capa = fields[CAPACITY].available ? (uint16_t)fields[CAPACITY].value : 0U;
+        uint16_t rpm  = fields[RPM].available ? (uint16_t)fields[RPM].value : 0U;
+
+        ibusPutU16(payload + 0, extV);
+        ibusPutU16(payload + 2, cellAvg);
+        ibusPutU16(payload + 4, (uint16_t)curr);
+        ibusPutU16(payload + 6, capa);
+        ibusPutU16(payload + 8, rpm);
+        return;
+    }
+
+    if (fieldId == IBUS_OXS_ACC_FULL_FIELD) {
+        // -----------------------------------------------------------------
+        // AFHDS2A ACC_FULL (0xEF), native payload length = 12 bytes.
+        //
+        // Standard layout:
+        //   bytes  0..1  AccX
+        //   bytes  2..3  AccY
+        //   bytes  4..5  AccZ
+        //   bytes  6..7  Roll
+        //   bytes  8..9  Pitch
+        //   bytes 10..11 Yaw
+        //
+        // IMPORTANT:
+        // Keep ACC_FULL exactly 12 bytes. Earlier tests with an additional
+        // 32-bit iBUS sensor changed AFHDS2A RF packing and caused C1..C3
+        // to disappear.
+        //
+        // oXs -> OpenAVRc private GPS-time extension:
+        //
+        // When GPS_TIME is available, the three attitude words are reused
+        // without changing the packet size:
+        //
+        //   Roll  = 0x48HH   ('H' in the high byte, hour in the low byte)
+        //   Pitch = 0x4DMM   ('M' in the high byte, minute in the low byte)
+        //   Yaw   = 0x53SS   ('S' in the high byte, second in the low byte)
+        //
+        // Example:
+        //   GPS_TIME = 0x160D1F00 = 22:13:31
+        //
+        //   Roll  = 0x4816
+        //   Pitch = 0x4D0D
+        //   Yaw   = 0x531F
+        //
+        // OpenAVRc checks all three ASCII tags H/M/S plus valid ranges
+        // before accepting the data as GPS time. This avoids accidentally
+        // decoding normal Roll/Pitch/Yaw values as a clock.
+        //
+        // If GPS_TIME is not available, normal Roll/Pitch/Yaw values are
+        // transmitted exactly as in the validated V4 implementation.
+        // -----------------------------------------------------------------
+
+        ibusPutS16(payload + 0, fields[ACC_X].available ? ibusAccelFromOxs(fields[ACC_X].value) : 0);
+        ibusPutS16(payload + 2, fields[ACC_Y].available ? ibusAccelFromOxs(fields[ACC_Y].value) : 0);
+        ibusPutS16(payload + 4, fields[ACC_Z].available ? ibusAccelFromOxs(fields[ACC_Z].value) : 0);
+
+        if (fields[GPS_TIME].available) {
+            const uint32_t gpsTime = (uint32_t)fields[GPS_TIME].value;
+            const uint8_t gpsHour   = (uint8_t)(gpsTime >> 24);
+            const uint8_t gpsMinute = (uint8_t)(gpsTime >> 16);
+            const uint8_t gpsSecond = (uint8_t)(gpsTime >> 8);
+
+            // Only send the private HMS extension when the GPS time is valid.
+            // Otherwise fall back to the normal attitude values below.
+            if (gpsHour < 24U && gpsMinute < 60U && gpsSecond < 60U) {
+                ibusPutU16(payload + 6,  (uint16_t)(0x4800U | gpsHour));    // H + hour
+                ibusPutU16(payload + 8,  (uint16_t)(0x4D00U | gpsMinute));  // M + minute
+                ibusPutU16(payload + 10, (uint16_t)(0x5300U | gpsSecond));  // S + second
+                return;
+            }
+        }
+
+        // Standard ACC_FULL fallback: preserve native Roll/Pitch/Yaw.
+        ibusPutS16(payload + 6, fields[ROLL].available  ? (int16_t)(fields[ROLL].value * 100L)  : 0);
+        ibusPutS16(payload + 8, fields[PITCH].available ? (int16_t)(fields[PITCH].value * 100L) : 0);
+        ibusPutS16(payload + 10, fields[YAW].available  ? (int16_t)(fields[YAW].value * 100L)   : 0);
+    }
+}
 
 void ibusPioRxHandlerIrq(){    // when a byte is received on the ibus bus, read the pio sbus fifo and push the data to a queue (to be processed in the main loop)
   // clear the irq flag
@@ -336,9 +438,25 @@ void handleIbusRxTx(void){   // main loop : restore receiving mode , wait for tl
                 //printf("ibus get %x %x %x %x\n", data[0] , data[1], data[2], data[3]);
                 ibusCmd = data[1] >> 4;
                 ibusAdr =  data[1] & 0X0F ;
-                ibusType = ibusTypes[listOfIbusFields[ibusAdr]]; // type of field being sent
+                const uint8_t fieldId = listOfIbusFields[ibusAdr];
+                const bool isCell = (fieldId == IBUS_OXS_CELL0_DUMMY ||
+                                     (fieldId >= IBUS_OXS_CELL1_FIELD &&
+                                      fieldId <= IBUS_OXS_CELL6_FIELD));
+
                 ibusValueLength = 2;
-                if( ibusType >= 0X80 && ibusType <= 0X8F ) ibusValueLength = 4; // length of field    
+                if (fieldId == IBUS_OXS_GPS_FULL_FIELD) {
+                    ibusType = IBUS_SENSOR_TYPE_GPS_FULL;
+                    ibusValueLength = 14;
+                } else if (fieldId == IBUS_OXS_VOLT_FULL_FIELD) {
+                    ibusType = IBUS_SENSOR_TYPE_VOLT_FULL;
+                    ibusValueLength = 10;
+                } else if (fieldId == IBUS_OXS_ACC_FULL_FIELD) {
+                    ibusType = IBUS_SENSOR_TYPE_ACC_FULL;
+                    ibusValueLength = 12;
+                } else {
+                    ibusType = isCell ? IBUS_SENSOR_TYPE_CELL : ibusTypes[fieldId];
+                    if( ibusType >= 0X80 && ibusType <= 0X8F ) ibusValueLength = 4;
+                }
                 switch (ibusCmd) {
                     case 0X08: // request discovering next sensor ; we reply the same value to confirm it exists
                         if ( ibusAdr > (maxIbusFieldsIdx)) {
@@ -376,14 +494,28 @@ void handleIbusRxTx(void){   // main loop : restore receiving mode , wait for tl
                         ibusTxBuffer[0] = ibusValueLength + 4; // length of the frame
                         ibusTxBuffer[1] = data[1]; // original cmd +adr
                         checksum = 0xFFFF - (ibusTxBuffer[0] + ibusTxBuffer[1]);
-                        //if (formatIbusValue(ibusAdr) == false) return ; // skip when value is not available
-                        formatIbusValue(ibusAdr); 
-                        uint8_t pByte;
-                        for (int i = 0; i < ibusValueLength; i++) {  // there can be 2 or 4 bytes in the value
-                            pByte     = (ibusValue >> (8 * i)) & 0xFF;
-                            checksum -= pByte;
-                            ibusTxBuffer[2+i] = pByte ;
+
+                        // A missing scalar value is sent as zero. Extended AFHDS2A
+                        // groups are formatted exactly as EdgeTX decodes them.
+                        if (fieldId == IBUS_OXS_GPS_FULL_FIELD ||
+                            fieldId == IBUS_OXS_VOLT_FULL_FIELD ||
+                            fieldId == IBUS_OXS_ACC_FULL_FIELD)
+                        {
+                            formatIbusExtendedPayload(fieldId, &ibusTxBuffer[2]);
+                            for (uint8_t i = 0; i < ibusValueLength; ++i)
+                                checksum -= ibusTxBuffer[2 + i];
                         }
+                        else
+                        {
+                            formatIbusValue(ibusAdr);
+                            for (uint8_t i = 0; i < ibusValueLength; i++)
+                            {
+                                const uint8_t pByte = (ibusValue >> (8 * i)) & 0xFF;
+                                checksum -= pByte;
+                                ibusTxBuffer[2 + i] = pByte;
+                            }
+                        }
+
                         ibusTxBuffer[ibusValueLength + 2] = checksum;
                         ibusTxBuffer[ibusValueLength + 3] = checksum >> 8;
                         break;
@@ -408,7 +540,7 @@ void handleIbusRxTx(void){   // main loop : restore receiving mode , wait for tl
             } // end if        
             break;
         case WAIT_END_OF_SENDING :
-            if ( ( microsRp() - ibusStartWaiting) > (1000) ){ // wait that the 8 bytes have been sent ( ???? usec)
+            if ( ( microsRp() - ibusStartWaiting) > (2500) ){ // wait until the longest extended iBUS reply has been sent ( ???? usec)
                 ibus_uart_tx_program_stop(ibusPio, ibusSmTx, config.pinTlm );
                 ibus_uart_rx_program_restart(ibusPio, ibusSmRx, config.pinTlm, false );  // false = not inverted
                 ibusState = RECEIVING ;
@@ -422,6 +554,18 @@ void handleIbusRxTx(void){   // main loop : restore receiving mode , wait for tl
 bool formatIbusValue( uint8_t ibusAdr){
     uint8_t fieldId = listOfIbusFields[ibusAdr];
     ibusValue = 0;
+
+    if (fieldId == IBUS_OXS_CELL0_DUMMY) {
+        ibusValue = 0;
+        return true;
+    }
+
+    if (fieldId >= IBUS_OXS_CELL1_FIELD && fieldId <= IBUS_OXS_CELL6_FIELD) {
+        const uint8_t cellIdx = fieldId - IBUS_OXS_CELL1_FIELD;
+        ibusValue = ibusCellCentivolts(cellIdx);
+        return ibusValue != 0;
+    }
+
     if (fields[fieldId].available == false) return false; // false when the value is not available
     ibusValue= fields[fieldId].value ; // default do not use conversion
     switch (fieldId) {
@@ -454,7 +598,8 @@ bool formatIbusValue( uint8_t ibusAdr){
         //    value= fields[fieldId].value ; // from cm/sec to 0.1m/sec
         //    break;
         case GROUNDSPEED:
-            ibusValue= fields[fieldId].value * 36 /1000; // from cm/sec to km/sec
+            // oXs stores cm/s, numerically identical to AFHDS2A m/s * 100.
+            ibusValue = fields[fieldId].value;
             break;            
         //case RPM:
         //    value= fields[fieldId].value *60 / 100 ; // from Hz to 100 tr/min???? not sure it is ok
@@ -468,6 +613,13 @@ bool formatIbusValue( uint8_t ibusAdr){
         //case RELATIVEALT:
         //    value= fields[fieldId].value ; // from cm to cm
         //    break;
+        case ACC_X:
+        case ACC_Y:
+        case ACC_Z:
+            // oXs stores acceleration in 0.001 g. EdgeTX AFHDS2A defines
+            // IDs 0x0C..0x0E as signed m/s2 * 100.
+            ibusValue = (fields[fieldId].value * 981L) / 1000L;
+            break;
         case ADS_1_1:
             ibusValue= int_round(fields[fieldId].value , 10); // from mvolt to 0.01V
             break;

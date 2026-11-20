@@ -1,26 +1,76 @@
-// HOTT GPS RX-GAP DIAGNOSTIC
-// Based on hott_GPS_STATIC_FRAME_DEBUG.cpp
+// SAFE BUS + GPS discovery + EAM cells + GPS UTC time
+// HoTT 0x8A bytes 33/34/35 carry GPS_TIME HH/MM/SS for OpenAVRc.
+// All SAFE BUS, GPS discovery, GAM and EAM cell logic otherwise unchanged.
 //
-// Key test:
-// - original code stayed deaf for HOTTV4_END_SENDING_DELAY = 25 ms after DMA completion.
-// - this version waits for PIO TX FIFO empty + only 2 ms guard, then restores RX.
+// HoTT SAFE BUS + GPS discovery + EAc1 six-cell discovery fix
 //
-// Console also prints:
-//   FF = forcedFields
-//   C  = six GAM cell bytes actually transmitted (20 mV/step)
-// Expected FVP cells: 210,209,208,207,206,205  => 4.20,4.18,4.16,4.14,4.12,4.10 V
+// Changes versus previous EAc1 version:
+// - EAc1 is advertised from boot as a SIX-cell sensor using 20 mV sentinels.
+// - FVP/FVN/FVPOWER immediately replace sentinels with tools.cpp cell values.
+// - GAcl remains empty.
+// - ADS values are never used as cells.
+// - GPS and SAFE BUS logic unchanged.
 //
-// STATIC GPS + HOTT CONSOLE DIAGNOSTIC
-// Console line every ~1 s:
-// [HOTT] RX GPS=n GAM=n | TX GPS=n GAM=n
-// Counters are cumulative from boot.
-// No printf from PIO IRQ.
-
-// STATIC HOTT GPS FRAME DIAGNOSTIC
-// GPS 0x8A always returns a fixed 45-byte HoTT GPS frame.
-// No dependency on real GPS, FVP/FVN, Tools fields, or GPS time.
-// GAM and transport timing are unchanged.
-
+// HoTT SAFE BUS + GPS discovery + dedicated TX16S cells on EAc1
+//
+// Cell policy:
+// - GAcl (GAM cells) is intentionally EMPTY.
+// - ADS_1_x / ADS_2_x are NEVER used as cells.
+// - EAM sensor 0x8E is always advertised from boot for GR-24 discovery.
+// - EdgeTX/TX16S receives simulated cells on EAc1.
+// - FVP/FVN/FVPOWER use getForcedCellValues() from tools.cpp.
+// - OAVRc can ignore the EAM completely.
+//
+// Expected FVP EAc1:
+//   C1=4.20V C2=4.18V C3=4.16V C4=4.14V C5=4.12V C6=4.10V
+//
+// SAFE BUS and GPS discovery logic are unchanged.
+//
+// HoTT SAFE BUS + GPS discovery fix
+//
+// Key fix:
+// oXs ALWAYS answers GPS poll 0x8A from startup.
+// - no physical GPS + no FVP: valid GPS sensor frame with NO FIX ('-')
+// - FVP/FVN: simulated GPS values
+// - physical GPS: normal real GPS values
+//
+// This lets GR-24 discover the GPS sensor at startup, so later FVP works
+// even when no physical GPS module is connected.
+//
+// SAFE BUS handling unchanged.
+//
+// HoTT SAFE BUS + GPS TEST
+// Base transport: hott_SAFE_BUS.cpp
+//
+// Preserved:
+// - SAFE half-duplex bus handling
+// - TX pin high-impedance outside actual HoTT replies
+// - FIFO-empty + 2 ms release guard
+// - normal GAM behaviour
+//
+// GPS added:
+// - physical GPS when gps.gpsInstalled == true
+// - FVP/FVN simulated GPS even with no physical GPS
+// - FVP uses fields[] from tools.cpp (Paris test coordinates, speed, heading,
+//   altitude, satellites, home distance/bearing)
+// - standard HoTT GPS 0x8A frame + checksum
+//
+// No OpenAVRc-specific change.
+//
+// HoTT SAFE BUS TEST
+// Based on the clean/original oXs hott.cpp transport.
+//
+// Goal: make oXs harmless on the shared GR-24 HoTT bus.
+// - TX pin is explicitly high-impedance except during an actual reply.
+// - After DMA, wait until the PIO TX FIFO is empty.
+// - Then wait 2 ms for the last byte still being shifted.
+// - Immediately switch TX pin back to input and restart RX.
+// - No FVP marker, no GPS-only mode, no OpenAVRc-specific extension.
+// - Normal GAM and normal physical-GPS behaviour are preserved.
+//
+// First validation target: TX16S/EdgeTX must again see receiver telemetry
+// with oXs physically connected.
+//
 // File for Hott
 /*
 In Hott protocol, the Rx send a polling to each of the possible sensors (there are 5 types of sensors).
@@ -63,13 +113,10 @@ extern field fields[];  // list of all telemetry fields and parameters used by S
 extern GPS gps;
 extern CONFIG config;
 extern uint8_t debugTlm;
+extern uint8_t forcedFields; // FVP/FVN simulation state
+const uint16_t * getForcedCellValues(uint8_t forcedFields);
 extern ADS1115 adc1;
 extern ADS1115 adc2;
-extern uint8_t forcedFields;
-
-// Generic LiPo simulation provided by tools.cpp (FVP/FVN).
-// HoTT/OpenAVRc deliberately uses only C1..C6.
-const uint16_t * getForcedCellValues(uint8_t forcedFields);
 
 
 // one pio and 2 state machines are used to manage the hott bus in halfduplex
@@ -106,6 +153,13 @@ enum HOTTSTATES {
 
 uint32_t hottStartWaiting = 0; // timestamp (usec) when we start waiting 
 HOTTSTATES hottState;
+
+// SAFE BUS:
+// DMA completion only means the last bytes have been copied to the PIO FIFO.
+// When the FIFO finally becomes empty, the PIO can still be shifting the last byte.
+// Wait 2 ms from FIFO-empty, then immediately release the shared HoTT line.
+static uint32_t hottTxFifoEmptyUs = 0;
+#define HOTT_SAFE_TX_RELEASE_US 2000U
 
 /*
 extern OXS_MS5611 oXs_MS5611 ;
@@ -171,7 +225,10 @@ void setupHott() {
     );
 // Set up the state machine for transmit but do not yet start it (it starts only when a request from receiver is received)
     hottOffsetTx = pio_add_program(hottPio, &hott_uart_tx_program);
-    hott_uart_tx_program_init(hottPio, hottSmTx, hottOffsetTx, config.pinTlm, 19200 , false); // we use the same pin and baud rate for tx and rx, false means thet UART is not inverted 
+    hott_uart_tx_program_init(hottPio, hottSmTx, hottOffsetTx, config.pinTlm, 19200 , false); // we use the same pin and baud rate for tx and rx, false means thet UART is not inverted
+
+    // Be explicit: outside an actual HoTT reply, oXs must NEVER drive the shared line.
+    hott_uart_tx_program_stop(hottPio, hottSmTx, config.pinTlm);
 
 // set an irq on pio to handle a received byte
     irq_set_exclusive_handler( PIO0_IRQ_0 , hottPioRxHandlerIrq) ;
@@ -183,6 +240,98 @@ void setupHott() {
     hottState = RECEIVING; // consider we are receiving  
 }
 
+
+
+// -----------------------------------------------------------------------------
+// HoTT bus debug / sniffer
+//
+// Enabled with the existing oXs DEBUGTLM option (debugTlm == 'Y').
+// Nothing is printed from the PIO IRQ.  Bytes are decoded only after they have
+// been removed from hottRxQueue in handleHottRxTx(), so telemetry timing is not
+// disturbed by printf() inside the interrupt.
+//
+// What is reported:
+//   [HOTT POLL] BIN/TXT ID=xx
+//   [HOTT FRAME] ID=xx checksum=OK/BAD
+//   followed by the complete 45-byte HoTT frame, numbered 01..45.
+//
+// This is deliberately generic: no sensor ID is filtered.  It lets us observe
+// any real HoTT sensor/receiver response and compare bytes while moving a
+// receiver equipped with an accelerometer.
+// -----------------------------------------------------------------------------
+static void debugHottRxByte(uint8_t c)
+{
+    static uint8_t frame[TXHOTTDATA_BUFFERSIZE];
+    static uint8_t framePos = 0;
+    static uint8_t previous = 0;
+
+    if (debugTlm != 'Y') {
+        framePos = 0;
+        previous = c;
+        return;
+    }
+
+    // HoTT binary/text poll = 0x80/0x7F followed by sensor ID.
+    if (framePos == 0) {
+        if (previous == HOTT_BINARY_MODE_REQUEST_ID) {
+            printf("[HOTT POLL] BIN ID=%02X\n", c);
+        } else if (previous == HOTT_TEXT_MODE_REQUEST_ID) {
+            printf("[HOTT POLL] TXT ID=%02X\n", c);
+        }
+    }
+
+    // A binary HoTT sensor reply is 45 bytes and starts with 0x7C.
+    if (framePos == 0) {
+        if (c == 0x7C) {
+            frame[0] = c;
+            framePos = 1;
+        }
+    } else {
+        // If a new start byte unexpectedly appears before byte 45, resync.
+        if (c == 0x7C && framePos > 1) {
+            frame[0] = c;
+            framePos = 1;
+        } else {
+            frame[framePos++] = c;
+
+            if (framePos >= TXHOTTDATA_BUFFERSIZE) {
+                uint8_t checksum = 0;
+                for (uint8_t i = 0; i < (TXHOTTDATA_BUFFERSIZE - 1); ++i) {
+                    checksum += frame[i];
+                }
+
+                printf("\n[HOTT FRAME] ID=%02X checksum=%s\n",
+                       frame[1],
+                       (checksum == frame[TXHOTTDATA_BUFFERSIZE - 1]) ? "OK" : "BAD");
+
+                for (uint8_t i = 0; i < TXHOTTDATA_BUFFERSIZE; ++i) {
+                    printf("%02u:%02X", (unsigned)(i + 1), frame[i]);
+                    if (((i + 1) % 9U) == 0U || i == (TXHOTTDATA_BUFFERSIZE - 1)) {
+                        printf("\n");
+                    } else {
+                        printf(" ");
+                    }
+                }
+
+                // Highlight the area of interest in a GPS-style frame.
+                // No interpretation is imposed here: these are the real bytes.
+                if (frame[1] == HOTT_TELEMETRY_GPS_SENSOR_ID) {
+                    printf("[HOTT GPS 30..42] ");
+                    for (uint8_t i = 29; i <= 41; ++i) {
+                        printf("#%u=%02X", (unsigned)(i + 1), frame[i]);
+                        if (i < 41) printf(" ");
+                    }
+                    printf("\n");
+                }
+
+                printf("\n");
+                framePos = 0;
+            }
+        }
+    }
+
+    previous = c;
+}
 
 void hottPioRxHandlerIrq(){    // when a byte is received on the tlm pin, read the pio hott fifo and push the data to a queue (to be processed in the main loop)
   // clear the irq flag
@@ -202,13 +351,6 @@ uint32_t lastHottRequest = 0;
 void handleHottRxTx(void){   // main loop : restore receiving mode , wait for tlm request, prepare frame, start pio and dma to transmit it
     static uint8_t previous = 0;
     static uint8_t data;
-
-    // HoTT diagnostic counters (main-loop context only)
-    static uint32_t dbgGpsReq = 0;
-    static uint32_t dbgGamReq = 0;
-    static uint32_t dbgGpsTx  = 0;
-    static uint32_t dbgGamTx  = 0;
-    static uint32_t dbgLastMs = 0;
     if (config.pinTlm == 255) return ; // skip when Tlm is not foreseen
     switch (hottState) {
         case RECEIVING :
@@ -223,13 +365,19 @@ void handleHottRxTx(void){   // main loop : restore receiving mode , wait for tl
             #endif
             if (! queue_is_empty(&hottRxQueue)) {
                 queue_try_remove (&hottRxQueue,&data);
+
+                // Existing DEBUGTLM option: pass every received HoTT bus byte
+                // to the non-blocking frame decoder. No printf occurs in IRQ.
+                debugHottRxByte(data);
+
                 //printf("%X ", data);
                 if ( ( previous ==  HOTT_BINARY_MODE_REQUEST_ID) &&
-                     ( (data == HOTT_TELEMETRY_GAM_SENSOR_ID) || (data == HOTT_TELEMETRY_GPS_SENSOR_ID) ) ){
-                    if (data == HOTT_TELEMETRY_GPS_SENSOR_ID) ++dbgGpsReq;
-                    else ++dbgGamReq;
+                     ( (data == HOTT_TELEMETRY_GAM_SENSOR_ID) ||
+                       (data == HOTT_TELEMETRY_GPS_SENSOR_ID) ||
+                       (data == HOTT_TELEMETRY_GEA_SENSOR_ID) ) ){
                     hottState = WAIT_FOR_SENDING;
-                    hottStartWaiting = microsRp();
+                    hottStartWaiting = microsRp(); 
+                    //printf("r\n");
                 }
                 previous = data;
             }        
@@ -237,10 +385,9 @@ void handleHottRxTx(void){   // main loop : restore receiving mode , wait for tl
         case WAIT_FOR_SENDING :
             if ( ( microsRp() - hottStartWaiting) > HOTTV4_REPLY_DELAY){
                 if (sendHottFrame(data) ) { // data must be GAM or GPS; return true when a frame is really being sent
-                    if (data == HOTT_TELEMETRY_GPS_SENSOR_ID) ++dbgGpsTx;
-                    else if (data == HOTT_TELEMETRY_GAM_SENSOR_ID) ++dbgGamTx;
                     hottState = SENDING;
                     hottStartWaiting = microsRp();
+                    //printf("s\n");
                 } else { 
                     hottState = RECEIVING;
                 }   
@@ -255,39 +402,31 @@ void handleHottRxTx(void){   // main loop : restore receiving mode , wait for tl
             break;         
         
         case WAIT_END_OF_SENDING :
-            // DIAGNOSTIC:
-            // DMA completion does not mean the PIO has shifted the last bytes yet.
-            // Wait until the TX FIFO is empty, then keep only a short 2 ms guard.
-            // The original 25 ms guard can make oXs deaf to the receiver's next
-            // HoTT sensor poll (for example GPS immediately after GAM).
-            if ( pio_sm_is_tx_fifo_empty(hottPio, hottSmTx) &&
-                 ( microsRp() - hottStartWaiting) > 2000U ){
-                hott_uart_tx_program_stop(hottPio, hottSmTx, config.pinTlm );
-                hott_uart_rx_program_restart(hottPio, hottSmRx, config.pinTlm, false );  // false = not inverted
-                hottState = RECEIVING ;
+            // Do not keep the HoTT line actively HIGH for the old fixed 25 ms.
+            // As soon as the PIO FIFO is empty, start a short guard that is long
+            // enough for the last byte already in the OSR to leave the pin.
+            if (pio_sm_is_tx_fifo_empty(hottPio, hottSmTx)) {
+                if (hottTxFifoEmptyUs == 0U) {
+                    hottTxFifoEmptyUs = microsRp();
+                } else if ((microsRp() - hottTxFifoEmptyUs) > HOTT_SAFE_TX_RELEASE_US) {
+                    // CRSF/DSM-style rule: when we have finished talking,
+                    // release the shared wire immediately and go back to RX.
+                    hott_uart_tx_program_stop(hottPio, hottSmTx, config.pinTlm );
+                    pio_sm_clear_fifos(hottPio, hottSmRx);
+                    hott_uart_rx_program_restart(hottPio, hottSmRx, config.pinTlm, false );  // false = not inverted
+                    hottTxFifoEmptyUs = 0U;
+                    previous = 0U;
+                    hottState = RECEIVING ;
+                }
+            } else {
+                hottTxFifoEmptyUs = 0U;
             }
             break;     
     }
      
-
-    // One concise line per second; never from the PIO interrupt.
-    const uint32_t dbgNowMs = millisRp();
-    if ((uint32_t)(dbgNowMs - dbgLastMs) >= 1000U) {
-        dbgLastMs = dbgNowMs;
-        printf("[HOTT] RX GPS=%lu GAM=%lu | TX GPS=%lu GAM=%lu | FF=%u | C=%u,%u,%u,%u,%u,%u\n",
-               (unsigned long)dbgGpsReq,
-               (unsigned long)dbgGamReq,
-               (unsigned long)dbgGpsTx,
-               (unsigned long)dbgGamTx,
-               (unsigned int)forcedFields,
-               (unsigned int)TxHottData.gamMsg.cell[0],
-               (unsigned int)TxHottData.gamMsg.cell[1],
-               (unsigned int)TxHottData.gamMsg.cell[2],
-               (unsigned int)TxHottData.gamMsg.cell[3],
-               (unsigned int)TxHottData.gamMsg.cell[4],
-               (unsigned int)TxHottData.gamMsg.cell[5]);
-    }
 }
+
+static bool fillHottEamCellsFrame();
 
 bool sendHottFrame(uint8_t data) { // return true when a frame is being sent
     bool sendingRequired = false;
@@ -298,9 +437,13 @@ bool sendHottFrame(uint8_t data) { // return true when a frame is being sent
         case HOTT_TELEMETRY_GPS_SENSOR_ID:
             sendingRequired = fillHottGpsFrame();
             break;
+        case HOTT_TELEMETRY_GEA_SENSOR_ID: // 0x8E = EAM
+            sendingRequired = fillHottEamCellsFrame();
+            break;
     }
     if (sendingRequired) { // when buffer is filled, it can be sent
         hott_uart_rx_program_stop(hottPio, hottSmRx, config.pinTlm); // stop receiving
+        hottTxFifoEmptyUs = 0U;
         hott_uart_tx_program_start(hottPio, hottSmTx, config.pinTlm, false); // prepare to transmit (do not invert)
         // start the DMA channel with the data to transmit
         dma_channel_set_read_addr (hott_dma_chan, &TxHottData.txBuffer[0], false);
@@ -315,47 +458,25 @@ bool fillHottGamFrame(){
     TxHottData.gamMsg.gam_sensor_id = 0x8d ; //GENRAL AIR MODULE = HOTT_TELEMETRY_GAM_SENSOR_ID
     TxHottData.gamMsg.sensor_id     = 0xd0 ;
     TxHottData.gamMsg.stop_byte     = 0x7D ;
-// in general air module data to fill are:
-    // FVP/FVN: use the generic LiPo simulation from Tools.
-    // OpenAVRc supports only 6S, so HoTT sends C1..C6 and ignores C7/C8.
-    const uint16_t * forcedCells = getForcedCellValues(forcedFields);
-    if (forcedCells != nullptr) {
-        for (uint8_t i = 0; i < 6; ++i) {
-            uint16_t cell = (forcedCells[i] + 10U) / 20U; // mV -> HoTT/OpenAVRc 0.02V units
-            if (cell > 253U) cell = 253U;
-            TxHottData.gamMsg.cell[i] = (uint8_t) cell;
-        }
+
+    // Private oXs -> OpenAVRc priority marker in HoTT GAM byte #43 (version).
+    // Normal HoTT keeps byte #43 at 0x00.
+    // FVP/FVN use a private marker so OpenAVRc can deliberately let the
+    // simulated oXs Alt/Vario override the GR-24 internal Vario.
+    if (forcedFields == 1 || forcedFields == 'P') {
+        TxHottData.gamMsg.version = 0xF1; // FVP
+    } else if (forcedFields == 2 || forcedFields == 'N') {
+        TxHottData.gamMsg.version = 0xF2; // FVN
     } else {
-        // Normal mode: preserve the existing real ADS cell path unchanged.
-        if (adc1.adsInstalled ){
-            if (fields[ADS_1_1].available ) {
-                if ( fields[ADS_1_1].value >= 5060) { TxHottData.gamMsg.cell[0] = 253;}
-                else if ( fields[ADS_1_1].value >= 0) { TxHottData.gamMsg.cell[0] =  (uint8_t) (fields[ADS_1_1].value /20) ;} // Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
-            }
-            if (fields[ADS_1_2].available ) {
-                if ( fields[ADS_1_2].value >= 5060) { TxHottData.gamMsg.cell[1] = 253;}
-                else if ( fields[ADS_1_2].value >= 0) { TxHottData.gamMsg.cell[1] =  (uint8_t) (fields[ADS_1_2].value /20) ;} // Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
-            }
-            if (fields[ADS_1_3].available ) {
-                if ( fields[ADS_1_3].value >= 5060) { TxHottData.gamMsg.cell[2] = 253;}
-                else if ( fields[ADS_1_3].value >= 0) { TxHottData.gamMsg.cell[2] =  (uint8_t) (fields[ADS_1_3].value /20) ; }// Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
-            }
-            if (fields[ADS_1_4].available ) {
-                if ( fields[ADS_1_4].value >= 5060) { TxHottData.gamMsg.cell[3] = 253;}
-                else if ( fields[ADS_1_4].value >= 0) { TxHottData.gamMsg.cell[3] =  (uint8_t) (fields[ADS_1_4].value /20) ; }// Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
-            }
-        }
-        if (adc2.adsInstalled ){
-            if (fields[ADS_2_1].available ) {
-                if ( fields[ADS_2_1].value >= 5060) { TxHottData.gamMsg.cell[4] = 253;}
-                else if ( fields[ADS_2_1].value >= 0) { TxHottData.gamMsg.cell[4] =  (uint8_t) (fields[ADS_2_1].value /20) ;} // Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
-            }
-            if (fields[ADS_2_2].available ) {
-                if ( fields[ADS_2_2].value >= 5060) { TxHottData.gamMsg.cell[5] = 253;}
-                else if ( fields[ADS_2_2].value >= 0) { TxHottData.gamMsg.cell[5] =  (uint8_t) (fields[ADS_2_2].value) /20 ;} // Volt Cell 1 (in 2 mV increments, 210 == 4.20 V)
-            }
-        }
+        TxHottData.gamMsg.version = 0x00; // standard HoTT
     }
+
+// in general air module data to fill are:
+    // GAcl deliberately left empty.
+    // ADS_1_x / ADS_2_x are independent analog telemetry inputs and must NOT
+    // be interpreted as LiPo cells.
+    // Dedicated TX16S cells are sent instead through EAM/EAc1 (0x8E).
+
     // TxHottData.gamMsg.cell[1] =  voltageData->mVoltCell[1] /20 ; // Volt Cell 2 (in 2 mV increments, 210 == 4.20 V)
     // TxHottData.gamMsg.cell[2] =  voltageData->mVoltCell[2] /20 ; // Volt Cell 3 (in 2 mV increments, 210 == 4.20 V)
     // TxHottData.gamMsg.cell[3] =  voltageData->mVoltCell[3] /20 ; // Volt Cell 4 (in 2 mV increments, 210 == 4.20 V)
@@ -419,64 +540,253 @@ bool fillHottGamFrame(){
     return true;
 }
 
-static uint8_t convertGpsFix[5] = {0x2d , 0x2d , 0x32 , 0x33 , 0x44 } ; 
 
-bool fillHottGpsFrame(){
-    // DIAGNOSTIC: fixed, self-contained HoTT GPS frame.
-    // No physical GPS, no forcedFields/FVP, no Tools fields, no GPS time.
-    // Coordinates:
-    //   48 deg 39.0988 N
-    //   9 deg 25.9360 E
-    // Altitude = 100 m (HoTT raw = 600 because of +500 m offset).
+// -----------------------------------------------------------------------------
+// EAM 0x8E used only as a dedicated Cells carrier for EdgeTX/TX16S.
+//
+// EdgeTX exposes the first EAM cell bank as EAc1 (UNIT_CELLS).
+// Bytes 7..12 of the 45-byte HoTT EAM frame correspond to cells 1..6.
+// No ADS value is ever used here.
+//
+// The EAM is ALWAYS answered so the GR-24 can discover sensor type 0x8E at boot.
+// When FVP/FVN/FVPOWER is inactive, cell bytes remain zero.
+// -----------------------------------------------------------------------------
+static bool fillHottEamCellsFrame() {
     memset(&TxHottData.txBuffer[0], 0, TXHOTTDATA_BUFFERSIZE);
 
-    TxHottData.gpsMsg.startByte    = 0x7C;
-    TxHottData.gpsMsg.sensorID     = 0x8A;
-    TxHottData.gpsMsg.sensorTextID = 0xA0;
+    // HoTT EAM fixed header/footer.
+    TxHottData.txBuffer[0]  = 0x7C; // start
+    TxHottData.txBuffer[1]  = HOTT_TELEMETRY_GEA_SENSOR_ID; // 0x8E
+    TxHottData.txBuffer[2]  = 0x00; // warning
+    TxHottData.txBuffer[3]  = HOTTV4_ELECTRICAL_AIR_SENSOR_TEXT_ID; // 0xE0
+    TxHottData.txBuffer[43] = 0x7D; // end
 
-    TxHottData.gpsMsg.flightDirection = 45; // 90 deg, 2 deg/step
-    TxHottData.gpsMsg.GPSSpeedLow  = 25;
-    TxHottData.gpsMsg.GPSSpeedHigh = 0;
+    // Keep the unused EAM fields neutral so any extra EA... sensors that
+    // EdgeTX discovers do not show nonsense values.
+    // temperature1/2: offset +20 => 0 degC
+    TxHottData.txBuffer[24] = 20;
+    TxHottData.txBuffer[25] = 20;
 
-    TxHottData.gpsMsg.LatitudeNS      = 0;    // N
-    TxHottData.gpsMsg.LatitudeMinLow  = 0xE7; // 4839
-    TxHottData.gpsMsg.LatitudeMinHigh = 0x12;
-    TxHottData.gpsMsg.LatitudeSecLow  = 0xDC; // 0988
-    TxHottData.gpsMsg.LatitudeSecHigh = 0x03;
+    // altitude: offset +500 => 0 m
+    const uint16_t neutralAlt = 500;
+    TxHottData.txBuffer[26] = (uint8_t)neutralAlt;
+    TxHottData.txBuffer[27] = (uint8_t)(neutralAlt >> 8);
 
-    TxHottData.gpsMsg.longitudeEW      = 0;    // E
-    TxHottData.gpsMsg.longitudeMinLow  = 0x9D; // 0925
-    TxHottData.gpsMsg.longitudeMinHigh = 0x03;
-    TxHottData.gpsMsg.longitudeSecLow  = 0x90; // 9360
-    TxHottData.gpsMsg.longitudeSecHigh = 0x24;
+    // climb rate: offset 30000 => 0.00 m/s
+    const uint16_t neutralVario = 30000;
+    TxHottData.txBuffer[34] = (uint8_t)neutralVario;
+    TxHottData.txBuffer[35] = (uint8_t)(neutralVario >> 8);
+    TxHottData.txBuffer[36] = 120; // 0 m/3s
 
-    TxHottData.gpsMsg.distanceLow  = 100;
-    TxHottData.gpsMsg.distanceHigh = 0;
+    // FVP/FVN/FVPOWER generic cell source from tools.cpp.
+    const uint16_t * cellsMv = getForcedCellValues(forcedFields);
+    if (cellsMv != nullptr) {
+        for (uint8_t i = 0; i < 6; ++i) {
+            uint16_t raw = (cellsMv[i] + 10U) / 20U; // mV -> 20 mV/step
+            if (raw > 253U) raw = 253U;
+            TxHottData.txBuffer[6U + i] = (uint8_t)raw; // EAc1 C1..C6
+        }
+    } else {
+        // EdgeTX creates a HoTT Cells sensor only when cell values are non-zero.
+        // Send six minimal 20 mV sentinels at boot so EAc1 is discovered as a
+        // six-cell sensor before FVP/FVN/FVPOWER is entered.
+        for (uint8_t i = 0; i < 6; ++i) {
+            TxHottData.txBuffer[6U + i] = 1U; // 1 * 20 mV = 0.02 V
+        }
+    }
 
-    const uint16_t altitudeHott = 600;
-    TxHottData.gpsMsg.altitudeLow  = (uint8_t)altitudeHott;
-    TxHottData.gpsMsg.altitudeHigh = (uint8_t)(altitudeHott >> 8);
-
-    const uint16_t varioHott = 30000;
-    TxHottData.gpsMsg.resolutionLow  = (uint8_t)varioHott;
-    TxHottData.gpsMsg.resolutionHigh = (uint8_t)(varioHott >> 8);
-    TxHottData.gpsMsg.unknow1 = 120;
-
-    TxHottData.gpsMsg.GPSNumSat = 10;
-    TxHottData.gpsMsg.GPSFixChar = '3';
-    TxHottData.gpsMsg.GPS_fix = '3';
-    TxHottData.gpsMsg.HomeDirection = 90;
-
-    TxHottData.gpsMsg.endByte = 0x7D;
-
-    TxHottData.txBuffer[TXHOTTDATA_BUFFERSIZE - 1] = 0;
-    for(uint8_t i = 0; i < TXHOTTDATA_BUFFERSIZE - 1; ++i){
-        TxHottData.txBuffer[TXHOTTDATA_BUFFERSIZE - 1] += TxHottData.txBuffer[i];
+    // Additive HoTT checksum over bytes 1..44 (array 0..43).
+    TxHottData.txBuffer[44] = 0;
+    for (uint8_t i = 0; i < 44; ++i) {
+        TxHottData.txBuffer[44] += TxHottData.txBuffer[i];
     }
 
     return true;
 }
 
+static uint8_t convertGpsFix[5] = {0x2d , 0x2d , 0x32 , 0x33 , 0x44 } ; 
+
+bool fillHottGpsFrame(){
+    const bool hottForcedGps = (forcedFields == 1 || forcedFields == 2 ||
+                                forcedFields == 'P' || forcedFields == 'N');
+
+    // IMPORTANT:
+    // Always answer HoTT GPS poll 0x8A, even when no physical GPS is installed.
+    // The GR-24 discovers external sensor types mainly at startup.
+    // If oXs stays silent at boot, a later FVP cannot make a new GPS sensor appear.
+    memset(&TxHottData.txBuffer[0], 0 , TXHOTTDATA_BUFFERSIZE) ;
+
+    TxHottData.gpsMsg.startByte    = 0x7c ;
+    TxHottData.gpsMsg.sensorID     = HOTT_TELEMETRY_GPS_SENSOR_ID ; // 0x8A
+    TxHottData.gpsMsg.sensorTextID = HOTTV4_GPS_SENSOR_TEXT_ID ;    // 0xA0
+    TxHottData.gpsMsg.endByte      = 0x7D ;
+
+    // Default frame = GPS present but NO FIX.
+    // This is enough for GR-24 discovery without inventing coordinates.
+    TxHottData.gpsMsg.GPSFixChar = 0x2D; // '-'
+    TxHottData.gpsMsg.GPS_fix    = 0x2D;
+    TxHottData.gpsMsg.altitudeLow  = 500 & 0xFF;
+    TxHottData.gpsMsg.altitudeHigh = 500 >> 8;
+    TxHottData.gpsMsg.resolutionLow  = 30000 & 0xFF;
+    TxHottData.gpsMsg.resolutionHigh = 30000 >> 8;
+    TxHottData.gpsMsg.unknow1 = 120;
+
+    // FVP/FVN: use simulated telemetry values, even without physical GPS.
+    if (hottForcedGps) {
+        int32_t heading100 = fields[HEADING].value;
+        while (heading100 < 0) heading100 += 36000;
+        while (heading100 >= 36000) heading100 -= 36000;
+        TxHottData.gpsMsg.flightDirection = (uint8_t)(heading100 / 200);
+
+        int32_t groundSpeed = fields[GROUNDSPEED].value;
+        if (groundSpeed < 0) groundSpeed = 0;
+        uint16_t speedHott = ((uint32_t)groundSpeed) * 36U / 1000U;
+        TxHottData.gpsMsg.GPSSpeedLow  = (uint8_t)speedHott;
+        TxHottData.gpsMsg.GPSSpeedHigh = (uint8_t)(speedHott >> 8);
+
+        uint16_t degMin = 0;
+        uint16_t decimalMin = 0;
+
+        TxHottData.gpsMsg.LatitudeNS = (fields[LATITUDE].value < 0);
+        convertLonLat_Hott(fields[LATITUDE].value, &degMin, &decimalMin);
+        TxHottData.gpsMsg.LatitudeMinLow  = (uint8_t)degMin;
+        TxHottData.gpsMsg.LatitudeMinHigh = (uint8_t)(degMin >> 8);
+        TxHottData.gpsMsg.LatitudeSecLow  = (uint8_t)decimalMin;
+        TxHottData.gpsMsg.LatitudeSecHigh = (uint8_t)(decimalMin >> 8);
+
+        TxHottData.gpsMsg.longitudeEW = (fields[LONGITUDE].value < 0);
+        convertLonLat_Hott(fields[LONGITUDE].value, &degMin, &decimalMin);
+        TxHottData.gpsMsg.longitudeMinLow  = (uint8_t)degMin;
+        TxHottData.gpsMsg.longitudeMinHigh = (uint8_t)(degMin >> 8);
+        TxHottData.gpsMsg.longitudeSecLow  = (uint8_t)decimalMin;
+        TxHottData.gpsMsg.longitudeSecHigh = (uint8_t)(decimalMin >> 8);
+
+        int32_t distance = fields[GPS_HOME_DISTANCE].value;
+        if (distance < 0) distance = 0;
+        if (distance > 65535) distance = 65535;
+        TxHottData.gpsMsg.distanceLow  = (uint8_t)distance;
+        TxHottData.gpsMsg.distanceHigh = (uint8_t)(distance >> 8);
+
+        int32_t homeBearing = fields[GPS_HOME_BEARING].value;
+        while (homeBearing < 0) homeBearing += 360;
+        while (homeBearing >= 360) homeBearing -= 360;
+        TxHottData.gpsMsg.HomeDirection = (uint8_t)(homeBearing / 2);
+
+        int32_t altitudeHott = 500L + (fields[ALTITUDE].value / 100L);
+        if (altitudeHott < 0) altitudeHott = 0;
+        if (altitudeHott > 65535) altitudeHott = 65535;
+        TxHottData.gpsMsg.altitudeLow  = (uint8_t)altitudeHott;
+        TxHottData.gpsMsg.altitudeHigh = (uint8_t)(altitudeHott >> 8);
+
+        int32_t sat = fields[NUMSAT].value;
+        if (sat < 0) sat = 0;
+        if (sat > 255) sat = 255;
+        TxHottData.gpsMsg.GPSNumSat = (uint8_t)sat;
+
+        TxHottData.gpsMsg.GPSFixChar = 0x33; // '3'
+        TxHottData.gpsMsg.GPS_fix    = 0x33;
+
+        int32_t vario = 30000L + fields[VSPEED].value;
+        if (vario < 0) vario = 0;
+        if (vario > 65535) vario = 65535;
+        TxHottData.gpsMsg.resolutionLow  = (uint8_t)vario;
+        TxHottData.gpsMsg.resolutionHigh = (uint8_t)(vario >> 8);
+    }
+    // Physical GPS: use real GPS values when not in forced mode.
+    else if (gps.gpsInstalled) {
+        uint16_t altitudeHott = 500;
+
+        if ((gps.GPS_fix_type == 3) || (gps.GPS_fix_type == 4)) {
+            TxHottData.gpsMsg.flightDirection = fields[HEADING].value / 200;
+
+            uint16_t speedHott = ((uint32_t)fields[GROUNDSPEED].value) * 36U / 1000U;
+            TxHottData.gpsMsg.GPSSpeedLow  = (uint8_t)speedHott;
+            TxHottData.gpsMsg.GPSSpeedHigh = (uint8_t)(speedHott >> 8);
+
+            uint16_t degMin = 0;
+            uint16_t decimalMin = 0;
+
+            TxHottData.gpsMsg.LatitudeNS = (fields[LATITUDE].value < 0);
+            convertLonLat_Hott(fields[LATITUDE].value, &degMin, &decimalMin);
+            TxHottData.gpsMsg.LatitudeMinLow  = (uint8_t)degMin;
+            TxHottData.gpsMsg.LatitudeMinHigh = (uint8_t)(degMin >> 8);
+            TxHottData.gpsMsg.LatitudeSecLow  = (uint8_t)decimalMin;
+            TxHottData.gpsMsg.LatitudeSecHigh = (uint8_t)(decimalMin >> 8);
+
+            TxHottData.gpsMsg.longitudeEW = (fields[LONGITUDE].value < 0);
+            convertLonLat_Hott(fields[LONGITUDE].value, &degMin, &decimalMin);
+            TxHottData.gpsMsg.longitudeMinLow  = (uint8_t)degMin;
+            TxHottData.gpsMsg.longitudeMinHigh = (uint8_t)(degMin >> 8);
+            TxHottData.gpsMsg.longitudeSecLow  = (uint8_t)decimalMin;
+            TxHottData.gpsMsg.longitudeSecHigh = (uint8_t)(decimalMin >> 8);
+
+            TxHottData.gpsMsg.distanceLow  = (uint8_t)gps.GPS_distance;
+            TxHottData.gpsMsg.distanceHigh = (uint8_t)(gps.GPS_distance >> 8);
+            TxHottData.gpsMsg.HomeDirection = (uint8_t)(gps.GPS_bearing / 2);
+
+            int32_t a = 500L + (fields[ALTITUDE].value / 100L);
+            if (a < 0) a = 0;
+            if (a > 65535) a = 65535;
+            altitudeHott = (uint16_t)a;
+        }
+
+        uint8_t fix = gps.GPS_fix_type;
+        if (fix > 4) fix = 0;
+        TxHottData.gpsMsg.GPSFixChar = convertGpsFix[fix];
+        TxHottData.gpsMsg.GPS_fix    = TxHottData.gpsMsg.GPSFixChar;
+        TxHottData.gpsMsg.GPSNumSat  = fields[NUMSAT].value;
+        TxHottData.gpsMsg.altitudeLow  = (uint8_t)altitudeHott;
+        TxHottData.gpsMsg.altitudeHigh = (uint8_t)(altitudeHott >> 8);
+
+        uint16_t varioHott = 30000;
+#ifdef VARIO
+        varioHott += mainVspeed.value;
+#endif
+        TxHottData.gpsMsg.resolutionLow  = (uint8_t)varioHott;
+        TxHottData.gpsMsg.resolutionHigh = (uint8_t)(varioHott >> 8);
+    }
+
+    // ---------------------------------------------------------------------
+    // HoTT GPS bytes #33..#41, aligned with the MSRC HoTT layout:
+    //   #33 = UTC hour
+    //   #34 = UTC minute
+    //   #35 = UTC second
+    //   #36 = UTC milliseconds (0 here; oXs GPS_TIME has no ms)
+    //   #37/#38 = mean sea level altitude in meters
+    //   #39 = vibration
+    //   #40/#41 = free ASCII characters
+    //
+    // GPS_TIME is packed by tools.cpp as [HH, MM, SS, 00].
+    // Do not clear fields[GPS_TIME].available here because another output
+    // protocol may still need the same telemetry field.
+    // ---------------------------------------------------------------------
+    if (fields[GPS_TIME].available) {
+        const uint32_t gpsTime = (uint32_t)fields[GPS_TIME].value;
+        const uint8_t gpsHour   = (uint8_t)(gpsTime >> 24);
+        const uint8_t gpsMinute = (uint8_t)(gpsTime >> 16);
+        const uint8_t gpsSecond = (uint8_t)(gpsTime >> 8);
+
+        if (gpsHour < 24U && gpsMinute < 60U && gpsSecond < 60U) {
+            TxHottData.gpsMsg.gps_time_h = gpsHour;
+            TxHottData.gpsMsg.gps_time_m = gpsMinute;
+            TxHottData.gpsMsg.gps_time_s = gpsSecond;
+        }
+    }
+
+    // oXs ALTITUDE is in centimetres; HoTT/MSRC byte #37/#38 uses meters.
+    // Negative MSL altitude is represented as 0, matching MSRC behaviour.
+    int32_t mslAltitude = fields[ALTITUDE].value / 100L;
+    if (mslAltitude < 0) mslAltitude = 0;
+    if (mslAltitude > 65535L) mslAltitude = 65535L;
+    TxHottData.gpsMsg.msl_altitude = (uint16_t)mslAltitude;
+
+    TxHottData.txBuffer[TXHOTTDATA_BUFFERSIZE-1] = 0;
+    for(uint8_t i = 0; i < TXHOTTDATA_BUFFERSIZE-1; i++) {
+        TxHottData.txBuffer[TXHOTTDATA_BUFFERSIZE-1] += TxHottData.txBuffer[i];
+    }
+
+    return true;
+}
 
 
 #if defined(HOTT_MIN_VOLTAGE) or defined(HOTT_MAX_CONSUMED_CAPACITY) 

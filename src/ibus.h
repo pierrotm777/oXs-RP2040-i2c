@@ -48,11 +48,10 @@ enum {
     IBUS_SENSOR_TYPE_ALT_MAX          = 0x84, //4bytes signed MaxAlt m*100
 
     IBUS_SENSOR_TYPE_ALT_FLYSKY       = 0xf9, // Altitude 2 bytes signed in m
-#if defined(USE_TELEMETRY_IBUS_EXTENDED)
+    // AFHDS2A extended sensor groups decoded natively by EdgeTX.
     IBUS_SENSOR_TYPE_GPS_FULL         = 0xfd,
     IBUS_SENSOR_TYPE_VOLT_FULL        = 0xf0,
     IBUS_SENSOR_TYPE_ACC_FULL         = 0xef,
-#endif //defined(TELEMETRY_IBUS_EXTENDED)
     IBUS_SENSOR_TYPE_UNKNOWN          = 0xff
 } ;
 

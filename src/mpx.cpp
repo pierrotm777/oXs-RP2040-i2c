@@ -210,6 +210,7 @@ extern BMP280 baro3;
 
 extern GPS gps;
 extern CONFIG config;
+extern uint8_t forcedFields;
 
 void setupMpx() {                                                 
 // configure the queue to get the data from Mpx in the irq handle
@@ -367,7 +368,278 @@ void handleMpxRxTx(void){   // main loop : restore receiving mode , wait for tlm
 }
 
 
+
+// -----------------------------------------------------------------------------
+// oXs / OpenAVRc private FAST extension over Multiplex MSB
+//
+// Keep the existing MPX implementation unchanged and only split the private
+// OpenAVRc stream over the already-polled addresses 10, 14 and 15:
+//   addr 14, class 14/15 : latitude low/high 13-bit halves
+//   addr 15, class 14/15 : longitude low/high 13-bit halves
+//   addr 10, class 13    : C1 + C2 packed
+//   addr 10, class 14    : C3 + C4 packed
+//   addr 10, class 15    : C5 + C6 packed
+//   addr 10, class 11    : UTC HH:MM as minutes since midnight
+//   addr 10, class 12    : UTC seconds
+//
+// Addresses 0 and 1 are intentionally not used because the MPX receiver itself
+// can generate replies on these polls (see mpxPioRxHandlerIrq comments).
+// -----------------------------------------------------------------------------
+#define MPX_OXS_FAST_ADDR_TIME_CELLS  10U
+#define MPX_OXS_FAST_ADDR_LAT         14U
+#define MPX_OXS_FAST_ADDR_LON         15U
+
+static bool sendMpxPrivateFrame(uint8_t address, uint8_t klass, uint16_t value)
+{
+    if (dma_channel_is_busy(mpx_dma_chan))
+        return false;
+
+    value &= 0x3FFFU;
+    const uint16_t encodedValue = (uint16_t)(value << 1);
+
+    mpxTxBuffer[0] = (uint8_t)((address << 4) | (klass & 0x0FU));
+    mpxTxBuffer[1] = (uint8_t)encodedValue;
+    mpxTxBuffer[2] = (uint8_t)(encodedValue >> 8);
+
+    mpx_uart_rx_program_stop(mpxPio, mpxSmRx, config.pinTlm);
+    mpx_uart_tx_program_start(mpxPio, mpxSmTx, config.pinTlm, false);
+    dma_channel_set_read_addr(mpx_dma_chan, &mpxTxBuffer[0], false);
+    dma_channel_set_trans_count(mpx_dma_chan, 3, true);
+    return true;
+}
+
+static uint16_t mpxBiasSigned14(int32_t value, int32_t bias)
+{
+    value += bias;
+    if (value < 0L) value = 0L;
+    if (value > 16383L) value = 16383L;
+    return (uint16_t)value;
+}
+
+
+static uint16_t mpxPack2Cells(uint16_t aMv, uint16_t bMv)
+{
+    uint16_t a = (uint16_t)((aMv + 10U) / 20U); // 0.02 V/step
+    uint16_t b = (uint16_t)((bMv + 10U) / 20U);
+
+    // 7 bits/cell with 2.00 V offset => 2.00..4.54 V
+    if (a < 100U) a = 100U;
+    if (a > 227U) a = 227U;
+    if (b < 100U) b = 100U;
+    if (b > 227U) b = 227U;
+
+    return (uint16_t)(((a - 100U) & 0x7FU) |
+                      (((b - 100U) & 0x7FU) << 7));
+}
+
+static bool sendMpxFastOpenAvrcExtension(uint8_t data_id)
+{
+    // Extra OpenAVRc fields are interleaved with already-polled MPX addresses.
+    // Private class 15 is used because it is already validated through the RX-9-DR.
+    // This keeps the GPS/cell fast stream on address 10 unchanged.
+
+    // Address 6 normally carries TEMP1.
+    // Alternate one private TEMP2 reply with one normal TEMP1 reply.
+    if (data_id == 6U)
+    {
+        static uint8_t t2Phase = 0U;
+
+        if (fields[TEMP2].available) fields[TEMP2].onceAvailable = true;
+        if (!fields[TEMP2].onceAvailable)
+            return false;
+
+        if (t2Phase == 0U)
+        {
+            const uint16_t packedT2 =
+                mpxBiasSigned14((int32_t)fields[TEMP2].value, 1000L);
+            if (!sendMpxPrivateFrame(data_id, 15U, packedT2))
+                return false;
+            t2Phase = 1U;
+            return true;
+        }
+
+        t2Phase = 0U;
+        return false; // let normal TEMP1 pass
+    }
+
+    // AccX/Y/Z use oXs native 0.001 g units.
+    // Each one alternates with the normal field already assigned to its address.
+    // Bias 8192 makes the signed +/-8191 range fit in one positive 14-bit value.
+    if (data_id == 7U || data_id == 12U || data_id == 13U)
+    {
+        static uint8_t accXPhase = 0U;
+        static uint8_t accYPhase = 0U;
+        static uint8_t accZPhase = 0U;
+
+        uint8_t fieldId;
+        uint8_t *phase;
+
+        if (data_id == 7U)
+        {
+            fieldId = ACC_X;
+            phase = &accXPhase;
+        }
+        else if (data_id == 12U)
+        {
+            fieldId = ACC_Y;
+            phase = &accYPhase;
+        }
+        else
+        {
+            fieldId = ACC_Z;
+            phase = &accZPhase;
+        }
+
+        if (fields[fieldId].available) fields[fieldId].onceAvailable = true;
+        if (!fields[fieldId].onceAvailable)
+            return false;
+
+        if (*phase == 0U)
+        {
+            const uint16_t packedAcc =
+                mpxBiasSigned14((int32_t)fields[fieldId].value, 8192L);
+            if (!sendMpxPrivateFrame(data_id, 15U, packedAcc))
+                return false;
+            *phase = 1U;
+            return true;
+        }
+
+        *phase = 0U;
+        return false; // let the normal address value pass
+    }
+
+    // Latitude on address 14: two private replies, then let the normal
+    // altitude reply pass once. This preserves the existing address 14 data.
+    if (data_id == MPX_OXS_FAST_ADDR_LAT)
+    {
+        static uint8_t latPhase = 0U;
+        if (fields[LATITUDE].available) fields[LATITUDE].onceAvailable = true;
+        if (!fields[LATITUDE].onceAvailable) return false;
+
+        if (latPhase >= 2U)
+        {
+            latPhase = 0U;
+            return false;
+        }
+
+        const int32_t coordE5 = fields[LATITUDE].value / 100L;
+        const uint32_t packed = ((uint32_t)coordE5) & 0x03FFFFFFUL;
+        const uint16_t part = (latPhase == 0U)
+                            ? (uint16_t)(packed & 0x1FFFU)
+                            : (uint16_t)((packed >> 13) & 0x1FFFU);
+        const uint8_t klass = (latPhase == 0U) ? 14U : 15U;
+
+        if (!sendMpxPrivateFrame(data_id, klass, part)) return false;
+        latPhase++;
+        return true;
+    }
+
+    // Longitude on address 15: same principle; every third poll keeps the
+    // normal heading reply intact.
+    if (data_id == MPX_OXS_FAST_ADDR_LON)
+    {
+        static uint8_t lonPhase = 0U;
+        if (fields[LONGITUDE].available) fields[LONGITUDE].onceAvailable = true;
+        if (!fields[LONGITUDE].onceAvailable) return false;
+
+        if (lonPhase >= 2U)
+        {
+            lonPhase = 0U;
+            return false;
+        }
+
+        const int32_t coordE5 = fields[LONGITUDE].value / 100L;
+        const uint32_t packed = ((uint32_t)coordE5) & 0x03FFFFFFUL;
+        const uint16_t part = (lonPhase == 0U)
+                            ? (uint16_t)(packed & 0x1FFFU)
+                            : (uint16_t)((packed >> 13) & 0x1FFFU);
+        const uint8_t klass = (lonPhase == 0U) ? 14U : 15U;
+
+        if (!sendMpxPrivateFrame(data_id, klass, part)) return false;
+        lonPhase++;
+        return true;
+    }
+
+    if (data_id != MPX_OXS_FAST_ADDR_TIME_CELLS)
+        return false;
+
+    if (fields[GPS_TIME].available) fields[GPS_TIME].onceAvailable = true;
+
+    const uint16_t *cellValues = getForcedCellValues(forcedFields);
+    static uint8_t phase = 0U;
+
+    if (cellValues)
+    {
+        switch (phase)
+        {
+            case 0:
+                if (!sendMpxPrivateFrame(data_id, 13U,
+                                         mpxPack2Cells(cellValues[0], cellValues[1]))) return false;
+                break;
+            case 1:
+                if (!sendMpxPrivateFrame(data_id, 14U,
+                                         mpxPack2Cells(cellValues[2], cellValues[3]))) return false;
+                break;
+            case 2:
+                if (!sendMpxPrivateFrame(data_id, 15U,
+                                         mpxPack2Cells(cellValues[4], cellValues[5]))) return false;
+                break;
+            case 3:
+            case 4:
+            {
+                if (!fields[GPS_TIME].onceAvailable) { phase = 0U; return false; }
+                const uint32_t gpsTime = (uint32_t)fields[GPS_TIME].value;
+                const uint8_t hour   = (uint8_t)(gpsTime >> 24);
+                const uint8_t minute = (uint8_t)(gpsTime >> 16);
+                const uint8_t second = (uint8_t)(gpsTime >> 8);
+
+                if (phase == 3U)
+                {
+                    const uint16_t totalMinutes =
+                        (uint16_t)((uint16_t)hour * 60U + (uint16_t)minute);
+                    if (!sendMpxPrivateFrame(data_id, 11U, totalMinutes)) return false;
+                }
+                else
+                {
+                    if (!sendMpxPrivateFrame(data_id, 12U, (uint16_t)(second & 0x3FU))) return false;
+                }
+                break;
+            }
+        }
+
+        phase++;
+        if (phase >= 5U) phase = 0U;
+        return true;
+    }
+
+    // No simulated cells: alternate only HH:MM and seconds.
+    if (!fields[GPS_TIME].onceAvailable) return false;
+    const uint32_t gpsTime = (uint32_t)fields[GPS_TIME].value;
+    const uint8_t hour   = (uint8_t)(gpsTime >> 24);
+    const uint8_t minute = (uint8_t)(gpsTime >> 16);
+    const uint8_t second = (uint8_t)(gpsTime >> 8);
+
+    if (phase == 0U)
+    {
+        const uint16_t totalMinutes =
+            (uint16_t)((uint16_t)hour * 60U + (uint16_t)minute);
+        if (!sendMpxPrivateFrame(data_id, 11U, totalMinutes)) return false;
+        phase = 1U;
+    }
+    else
+    {
+        if (!sendMpxPrivateFrame(data_id, 12U, (uint16_t)(second & 0x3FU))) return false;
+        phase = 0U;
+    }
+    return true;
+}
+
+
 bool sendMpxFrame(uint8_t data_id){ // data_id is the address index of the field to transmit
+    // Fast private OpenAVRc extension; normal MPX fields fall through unchanged.
+    if (sendMpxFastOpenAvrcExtension(data_id))
+        return true;
+
     //bool sendingRequired = false;
     bool alarm = false;
     uint8_t fieldId = convertMpxAddToFieldId[data_id];
@@ -418,8 +690,24 @@ bool sendMpxFrame(uint8_t data_id){ // data_id is the address index of the field
             mpxValue= fields[fieldId].value * 3600/ 100 /100; // from cm/sec to 0.1 km/h
             break;            
         case RPM:
-            mpxValue= fields[fieldId].value / 100 ; // from rpm to 100 tr/min???? not sure it is ok
-            break;            
+        {
+            // oXs stores RPM input as frequency in Hz.
+            // Multiplex MSB v2 class 5:
+            //   positive value -> 100 rpm/step
+            //   negative value -> 10 rpm/step (higher resolution)
+            //
+            // Hz -> rpm -> 10 rpm units:
+            //   rpm = Hz * 60
+            //   units = rpm / 10 = Hz * 6
+            int32_t hz = fields[fieldId].value;
+            if (hz < 0) hz = -hz; // FVN/test values: RPM direction is not meaningful here.
+
+            int32_t units10rpm = hz * 6L;
+            if (units10rpm > 5000L) units10rpm = 5000L; // MSB v2 class-5 range
+
+            mpxValue = (int16_t)(-units10rpm);
+            break;
+        }
         case GPS_HOME_BEARING:
             mpxValue= fields[fieldId].value *10 ; // from  deg  to 0.1 deg
             break;

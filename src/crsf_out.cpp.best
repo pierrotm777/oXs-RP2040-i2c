@@ -1,0 +1,883 @@
+#include "pico/stdlib.h"
+#include <stdlib.h>
+#include "hardware/uart.h"
+#include "hardware/pio.h"
+#include "hardware/dma.h"
+#include "hardware/irq.h"
+#include "uart_crsf_tx.pio.h"
+#include "crsf_out.h"
+#include "config.h"
+#include "crc.h"
+#include "pico/util/queue.h"
+#include "MS5611.h"
+#include "SPL06.h"
+#include "tools.h"
+#include "stdio.h"
+#include <string.h> // memcpy
+#include "param.h"
+#include <inttypes.h>
+#include <math.h>
+#include "mpu.h"
+
+// -----------------------------------------------------------------------------
+// oXs CRSF telemetry extension for current EdgeTX / ELRS 4.x
+// Keeps the original frames and adds the frame types EdgeTX currently decodes:
+//   0x0A Airspeed
+//   0x0C RPM
+//   0x0D Temperature
+//   0x0E Voltage Group (ADS1115 #1)
+//   0x03 GPS UTC date/time (NEW: enables OpenAVRc RTC via CRSF -> S.Port)
+//   0x23 GPS Home position
+// Raw Accel/Gyro frame 0x13 is also emitted so OpenAVRc can recover the
+// real ACC_X / ACC_Y / ACC_Z values directly from the standard CRSF frame.
+// -----------------------------------------------------------------------------
+
+#define FRAME_TYPES_MAX 13
+
+// Existing indexes from crsf_frames.h remain 0..4.
+// Extra indexes are kept local so no change to crsf_frames.h is required.
+static constexpr uint8_t OXS_CRSF_FRAMEIDX_AIRSPEED = 5;
+static constexpr uint8_t OXS_CRSF_FRAMEIDX_RPM      = 6;
+static constexpr uint8_t OXS_CRSF_FRAMEIDX_TEMP     = 7;
+static constexpr uint8_t OXS_CRSF_FRAMEIDX_ADS1     = 8;
+static constexpr uint8_t OXS_CRSF_FRAMEIDX_GPS_TIME = 9;
+static constexpr uint8_t OXS_CRSF_FRAMEIDX_CELLS    = 10;
+static constexpr uint8_t OXS_CRSF_FRAMEIDX_ACCGYRO  = 11;
+static constexpr uint8_t OXS_CRSF_FRAMEIDX_GPS_HOME = 12;
+
+// Current CRSF broadcast frame IDs.
+static constexpr uint8_t OXS_CRSF_FRAMETYPE_AIRSPEED = 0x0A;
+static constexpr uint8_t OXS_CRSF_FRAMETYPE_RPM      = 0x0C;
+static constexpr uint8_t OXS_CRSF_FRAMETYPE_TEMP     = 0x0D;
+static constexpr uint8_t OXS_CRSF_FRAMETYPE_VOLTAGES = 0x0E;
+static constexpr uint8_t OXS_CRSF_FRAMETYPE_GPS_TIME = 0x03;
+static constexpr uint8_t OXS_CRSF_FRAMETYPE_ACCGYRO  = 0x13;
+static constexpr uint8_t OXS_CRSF_FRAMETYPE_GPS_HOME = 0x23;
+
+// Intervals are local on purpose: no config.h change is needed for this test.
+static constexpr uint32_t OXS_AIRSPEED_FRAME_INTERVAL = 250;
+static constexpr uint32_t OXS_RPM_FRAME_INTERVAL      = 500;
+static constexpr uint32_t OXS_TEMP_FRAME_INTERVAL     = 1000;
+static constexpr uint32_t OXS_ADS1_FRAME_INTERVAL     = 500;
+static constexpr uint32_t OXS_GPS_TIME_FRAME_INTERVAL = 1000;
+static constexpr uint32_t OXS_CELLS_FRAME_INTERVAL    = 1000;
+static constexpr uint32_t OXS_ACCGYRO_FRAME_INTERVAL  = 100;
+static constexpr uint32_t OXS_GPS_HOME_FRAME_INTERVAL = 1000;
+
+// source_id >= 129 means "general voltages" in CRSF 0x0E.
+// EdgeTX then exposes each 16-bit value as a separate voltage sensor.
+static constexpr uint8_t OXS_ADS1_VOLTAGE_SOURCE_ID = 129;
+
+uint32_t crsfFrameNextMillis[FRAME_TYPES_MAX] = {0};
+
+extern field fields[];
+extern GPS gps;
+extern CONFIG config;
+extern uint8_t debugTlm;
+extern MPU mpu;
+extern uint8_t forcedFields;
+extern const uint16_t * getForcedCellValues(uint8_t forcedFields);
+
+voltageFrameStruct voltageFrame;
+varioFrameStruct varioFrame;
+attitudeFrameStruct attitudeFrame;
+baroAltitudeFrameStruct baroAltitudeFrame;
+gpsFrameStruct gpsFrame;
+
+uint8_t CRSFBuffer[50];
+uint8_t CRSFBufferLength;
+
+PIO crsfPio = pio0;
+uint crsfSmTx = 0;
+
+int crsf_dma_chan;
+dma_channel_config c;
+
+GENERIC_CRC8 crsf_crc_out(CRSF_CRC_POLY);
+
+static inline bool crsfForcedPositive() {
+    return forcedFields == 'P' || forcedFields == 1;
+}
+
+static inline bool crsfForcedNegative() {
+    return forcedFields == 'N' || forcedFields == 2;
+}
+
+static inline bool crsfForcedFields() {
+    return crsfForcedPositive() || crsfForcedNegative();
+}
+
+
+static int32_t crsfClamp(int64_t v, int32_t lo, int32_t hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return static_cast<int32_t>(v);
+}
+
+static int32_t crsfRoundDiv(int64_t value, int32_t divisor) {
+    return static_cast<int32_t>(
+        value >= 0 ? (value + divisor / 2) / divisor
+                   : (value - divisor / 2) / divisor);
+}
+
+static void crsfStartDma() {
+    dma_channel_set_read_addr(crsf_dma_chan, &CRSFBuffer[0], false);
+    dma_channel_set_trans_count(crsf_dma_chan, CRSFBufferLength, true);
+}
+
+static void crsfDebugFrame(const char *name) {
+    if (debugTlm != 'Y') return;
+    printf("%s: ", name);
+    for (uint8_t i = 0; i < CRSFBufferLength; i++) printf(" %02X ", CRSFBuffer[i]);
+    printf("\n");
+}
+
+void setupCrsfOut() {
+    if (config.pinTlm == 255) return;
+
+    uint crsfOffsetTx = pio_add_program(crsfPio, &uart_tx_program);
+    uart_tx_program_init(crsfPio, crsfSmTx, crsfOffsetTx, config.pinTlm, config.crsfBaudrate);
+
+    crsf_dma_chan = dma_claim_unused_channel(true);
+    c = dma_channel_get_default_config(crsf_dma_chan);
+    channel_config_set_read_increment(&c, true);
+    channel_config_set_write_increment(&c, false);
+    channel_config_set_dreq(&c, DREQ_PIO0_TX0);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
+    dma_channel_configure(
+        crsf_dma_chan,
+        &c,
+        &pio0_hw->txf[0],
+        &CRSFBuffer[0],
+        0,
+        false
+    );
+}
+
+void fillCRSFFrame() {
+    static uint8_t crsf_last_frame_idx = 0;
+
+    if (config.pinTlm == 255) return;
+    if (dma_channel_is_busy(crsf_dma_chan)) return;
+
+    const uint32_t now = millisRp();
+
+    for (uint8_t i = 0; i < FRAME_TYPES_MAX; i++) {
+        crsf_last_frame_idx++;
+        if (crsf_last_frame_idx >= FRAME_TYPES_MAX) crsf_last_frame_idx = 0;
+
+        if (now >= crsfFrameNextMillis[crsf_last_frame_idx] &&
+            dataAvailable(crsf_last_frame_idx)) {
+            fillOneFrame(crsf_last_frame_idx);
+            break;
+        }
+    }
+}
+
+bool dataAvailable(uint8_t idx) {
+    switch (idx) {
+        case CRSF_FRAMEIDX_BATTERY_SENSOR:
+            return fields[MVOLT].available ||
+                   fields[CURRENT].available ||
+                   fields[CAPACITY].available;
+
+        case CRSF_FRAMEIDX_VARIO:
+            return fields[VSPEED].available;
+
+        case CRSF_FRAMEIDX_ATTITUDE:
+            return fields[PITCH].available ||
+                   fields[ROLL].available ||
+                   fields[YAW].available;
+
+        case CRSF_FRAMEIDX_GPS:
+            // Normal operation still requires a real GPS.
+            // FVP/FVN can now exercise the CRSF GPS frame without one.
+            return gps.gpsInstalled || crsfForcedFields();
+
+        case CRSF_FRAMEIDX_BARO_ALTITUDE:
+            return fields[RELATIVEALT].available;
+
+        case OXS_CRSF_FRAMEIDX_AIRSPEED:
+            return fields[AIRSPEED].available;
+
+        case OXS_CRSF_FRAMEIDX_RPM:
+            return fields[RPM].available;
+
+        case OXS_CRSF_FRAMEIDX_TEMP:
+            return fields[TEMP1].available || fields[TEMP2].available;
+
+        case OXS_CRSF_FRAMEIDX_ADS1:
+            return fields[ADS_1_1].available ||
+                   fields[ADS_1_2].available ||
+                   fields[ADS_1_3].available ||
+                   fields[ADS_1_4].available;
+
+        case OXS_CRSF_FRAMEIDX_GPS_TIME:
+            // A real GPS publishes GPS_TIME each new second. Its available
+            // flag is cleared after we send, so stale time is not replayed.
+            // GPS_DATE.onceAvailable remains true once a valid date arrived.
+            return (gps.gpsInstalled || crsfForcedFields()) &&
+                   fields[GPS_TIME].available && fields[GPS_DATE].onceAvailable;
+
+        case OXS_CRSF_FRAMEIDX_CELLS:
+            return getForcedCellValues(forcedFields) != nullptr;
+
+        case OXS_CRSF_FRAMEIDX_ACCGYRO:
+            return fields[ACC_X].available ||
+                   fields[ACC_Y].available ||
+                   fields[ACC_Z].available;
+
+        case OXS_CRSF_FRAMEIDX_GPS_HOME:
+            // Real GPS: Home is the first valid GPS position remembered by oXs.
+            // FVP/FVN: generate a Home position from forced distance/bearing.
+            return (gps.gpsInstalled && gps.GPS_home_lat != 0) || crsfForcedFields();
+    }
+    return false;
+}
+
+void fillBufferU8(uint8_t val) {
+    CRSFBuffer[CRSFBufferLength++] = val;
+}
+
+void fillBufferU16(uint16_t val) {
+    CRSFBuffer[CRSFBufferLength++] = val >> 8;
+    CRSFBuffer[CRSFBufferLength++] = val & 0xFF;
+}
+
+void fillBufferI16(int16_t val) {
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint16_t>(val) >> 8;
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint16_t>(val) & 0xFF;
+}
+
+void fillBufferU24(uint32_t val) {
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint8_t>((val >> 16) & 0xFF);
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint8_t>((val >> 8) & 0xFF);
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint8_t>(val & 0xFF);
+}
+
+void fillBufferI24(int32_t val) {
+    const uint32_t raw = static_cast<uint32_t>(val);
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint8_t>((raw >> 16) & 0xFF);
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint8_t>((raw >> 8) & 0xFF);
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint8_t>(raw & 0xFF);
+}
+
+void fillBufferI32(int32_t val) {
+    const uint32_t raw = static_cast<uint32_t>(val);
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint8_t>((raw >> 24) & 0xFF);
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint8_t>((raw >> 16) & 0xFF);
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint8_t>((raw >> 8) & 0xFF);
+    CRSFBuffer[CRSFBufferLength++] = static_cast<uint8_t>(raw & 0xFF);
+}
+
+void fillFrameBattery(uint8_t idx) {
+    CRSFBufferLength = 0;
+    const uint8_t payloadSize = CRSF_FRAME_BATTERY_SENSOR_PAYLOAD_SIZE + 1; // + optional sensor id
+
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(payloadSize + 2);
+    fillBufferU8(CRSF_FRAMETYPE_BATTERY_SENSOR);
+
+    fillBufferU16(fields[MVOLT].value > 0
+        ? static_cast<uint16_t>(int_round(fields[MVOLT].value, 100))
+        : 0);
+
+    fillBufferU16(fields[CURRENT].value > 0
+        ? static_cast<uint16_t>(int_round(fields[CURRENT].value, 100))
+        : 0);
+
+    fillBufferU24(fields[CAPACITY].value > 0
+        ? static_cast<uint32_t>(fields[CAPACITY].value)
+        : 0);
+
+    fillBufferU8(0); // remaining % not available in oXs yet
+    fillBufferU8(1); // CRSF 0x08 optional sensor id: oXs battery = 1
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2], payloadSize + 1));
+
+    // The 0x08 frame contains voltage, current and capacity.
+    // Consume the complete sample after it has been queued.
+    fields[MVOLT].available = false;
+    fields[CURRENT].available = false;
+    fields[CAPACITY].available = false;
+    crsfFrameNextMillis[idx] = millisRp() + VOLTAGE_FRAME_INTERVAL;
+    crsfDebugFrame("Bat");
+    crsfStartDma();
+}
+
+void fillFrameVario(uint8_t idx) {
+    CRSFBufferLength = 0;
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(CRSF_FRAME_VARIO_PAYLOAD_SIZE + 2);
+    fillBufferU8(CRSF_FRAMETYPE_VARIO);
+    fillBufferI16(static_cast<int16_t>(
+        crsfClamp(fields[VSPEED].value, -32768, 32767)));
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2],
+                                   CRSF_FRAME_VARIO_PAYLOAD_SIZE + 1));
+
+    fields[VSPEED].available = false;
+    crsfFrameNextMillis[idx] = millisRp() + VARIO_FRAME_INTERVAL;
+    crsfDebugFrame("Vario");
+    crsfStartDma();
+}
+
+void fillFrameBaroAltitude(uint8_t idx) {
+    CRSFBufferLength = 0;
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(CRSF_FRAME_BARO_ALTITUDE_PAYLOAD_SIZE + 2);
+    fillBufferU8(CRSF_FRAMETYPE_BARO_ALTITUDE);
+
+    // CRSF 0x09:
+    //   bit15 = 0 : altitude in 0.1 m with +1000 m offset
+    //   bit15 = 1 : altitude directly in whole metres
+    //
+    // oXs RELATIVEALT is stored in centimetres.
+    const int32_t altitudeCm = fields[RELATIVEALT].value;
+    const int32_t altitudeDm = altitudeCm / 10;
+    const int32_t offsetDm = altitudeDm + 10000;
+    uint16_t rawAltitude;
+
+    if (offsetDm >= 0 && offsetDm < 0x8000) {
+        rawAltitude = static_cast<uint16_t>(offsetDm);
+    } else {
+        int32_t altitudeM = altitudeCm / 100;
+        if (altitudeM < 0) altitudeM = 0;
+        if (altitudeM > 0x7FFE) altitudeM = 0x7FFE;
+        rawAltitude = static_cast<uint16_t>(0x8000U | altitudeM);
+    }
+
+    fillBufferU16(rawAltitude);
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2],
+                                   CRSF_FRAME_BARO_ALTITUDE_PAYLOAD_SIZE + 1));
+
+    fields[RELATIVEALT].available = false;
+    crsfFrameNextMillis[idx] = millisRp() + BARO_ALTITUDE_FRAME_INTERVAL;
+    crsfDebugFrame("Alt");
+    crsfStartDma();
+}
+
+void fillFrameAttitude(uint8_t idx) {
+    CRSFBufferLength = 0;
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(CRSF_FRAME_ATTITUDE_PAYLOAD_SIZE + 2);
+    fillBufferU8(CRSF_FRAMETYPE_ATTITUDE);
+
+    // oXs PITCH/ROLL/YAW are stored in 0.01 degree.
+    // Standard CRSF attitude 0x1E expects signed int16 values in rad * 10000.
+    // Convert explicitly: degree -> rad -> CRSF integer.
+    constexpr float OXS_DEG_TO_CRSF_RAD = 0.01f * 0.01745329251994329577f * 10000.0f;
+
+    const int16_t pitch = fields[PITCH].available
+        ? static_cast<int16_t>(crsfClamp(
+              static_cast<int32_t>(lroundf(static_cast<float>(fields[PITCH].value) *
+                                           OXS_DEG_TO_CRSF_RAD)),
+              -32768, 32767))
+        : 0;
+
+    const int16_t roll = fields[ROLL].available
+        ? static_cast<int16_t>(crsfClamp(
+              static_cast<int32_t>(lroundf(static_cast<float>(fields[ROLL].value) *
+                                           OXS_DEG_TO_CRSF_RAD)),
+              -32768, 32767))
+        : 0;
+
+    const int16_t yaw = fields[YAW].available
+        ? static_cast<int16_t>(crsfClamp(
+              static_cast<int32_t>(lroundf(static_cast<float>(fields[YAW].value) *
+                                           OXS_DEG_TO_CRSF_RAD)),
+              -32768, 32767))
+        : 0;
+
+    fillBufferI16(pitch);
+    fillBufferI16(roll);
+    fillBufferI16(yaw);
+
+    if (debugTlm == 'Y') {
+        printf("ATT src=%ld/%ld/%ld deg100 raw=%d/%d/%d radx10000\n",
+               (long)fields[PITCH].value,
+               (long)fields[ROLL].value,
+               (long)fields[YAW].value,
+               (int)pitch, (int)roll, (int)yaw);
+    }
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2],
+                                   CRSF_FRAME_ATTITUDE_PAYLOAD_SIZE + 1));
+
+    // Consume the attitude sample only after the complete CRSF 0x1E frame
+    // has been built. New MPU updates will set these flags again.
+    // This path is fully independent from CRSF 0x13 Accel/Gyro.
+    fields[PITCH].available = false;
+    fields[ROLL].available  = false;
+    fields[YAW].available   = false;
+
+    crsfFrameNextMillis[idx] = millisRp() + ATTITUDE_FRAME_INTERVAL;
+    crsfDebugFrame("Att");
+    crsfStartDma();
+}
+
+void fillFrameGps(uint8_t idx) {
+    CRSFBufferLength = 0;
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(CRSF_FRAME_GPS_PAYLOAD_SIZE + 2);
+    fillBufferU8(CRSF_FRAMETYPE_GPS);
+
+    fillBufferI32(fields[LATITUDE].value);
+    fillBufferI32(fields[LONGITUDE].value);
+
+    // oXs GROUNDSPEED: cm/s. CRSF/EdgeTX expects 0.1 km/h here.
+    const uint16_t speed01kmh = static_cast<uint16_t>(
+        crsfClamp(crsfRoundDiv(static_cast<int64_t>(fields[GROUNDSPEED].value) * 36, 100),
+                  0, 65535));
+    fillBufferU16(speed01kmh);
+
+    int32_t heading = fields[HEADING].value % 36000;
+    if (heading < 0) heading += 36000;
+    fillBufferU16(static_cast<uint16_t>(heading));
+
+    const int32_t gpsAltM = crsfRoundDiv(fields[ALTITUDE].value, 100);
+    fillBufferU16(static_cast<uint16_t>(
+        crsfClamp(1000 + gpsAltM, 0, 65535)));
+
+    // oXs marks a 3D fix by adding 100. CRSF wants the real satellite count.
+    int32_t sats = fields[NUMSAT].value;
+    if (sats >= 100) sats -= 100;
+    fillBufferU8(static_cast<uint8_t>(crsfClamp(sats, 0, 255)));
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2],
+                                   CRSF_FRAME_GPS_PAYLOAD_SIZE + 1));
+
+    fields[NUMSAT].available = false;
+    crsfFrameNextMillis[idx] = millisRp() + GPS_FRAME_INTERVAL;
+    crsfDebugFrame("Gps");
+    crsfStartDma();
+}
+
+// CRSF 0x23: GPS Home position.
+// Payload units are identical to CRSF GPS 0x02:
+//   latitude/longitude = degree * 1e7
+//   altitude           = metres + 1000 m offset
+//
+// With a real GPS, oXs already remembers the first valid latitude/longitude
+// as Home. Keep the Home altitude locally the first time that Home is sent;
+// this avoids any change to gps.cpp/gps.h and leaves all existing frames,
+// including the validated Acc/Gyro 0x13 frame, untouched.
+//
+// In FVP/FVN there is no real GPS Home coordinate, so derive one from the
+// forced current position + GPS_HOME_DISTANCE + GPS_HOME_BEARING.
+static void fillFrameGpsHome(uint8_t idx) {
+    int32_t homeLat;
+    int32_t homeLon;
+    int32_t homeAltCm;
+
+    if (gps.gpsInstalled && gps.GPS_home_lat != 0) {
+        static int32_t cachedHomeLat = 0;
+        static int32_t cachedHomeLon = 0;
+        static int32_t cachedHomeAltCm = 0;
+
+        homeLat = gps.GPS_home_lat;
+        homeLon = gps.GPS_home_lon;
+
+        // A changed Home coordinate means a new GPS Home was established.
+        if (homeLat != cachedHomeLat || homeLon != cachedHomeLon) {
+            cachedHomeLat = homeLat;
+            cachedHomeLon = homeLon;
+            cachedHomeAltCm = fields[ALTITUDE].value;
+        }
+        homeAltCm = cachedHomeAltCm;
+    } else {
+        const int32_t currentLat = fields[LATITUDE].value;
+        const int32_t currentLon = fields[LONGITUDE].value;
+
+        int32_t distanceM = fields[GPS_HOME_DISTANCE].value;
+        if (distanceM < 0) distanceM = -distanceM;
+
+        // oXs GPS_HOME_BEARING is the bearing from Home to the current point.
+        // Reverse that vector to recover the Home point around the current GPS.
+        float bearingDeg = static_cast<float>(fields[GPS_HOME_BEARING].value % 360);
+        if (bearingDeg < 0.0f) bearingDeg += 360.0f;
+        const float bearingRad = bearingDeg * 0.01745329251994329577f;
+        const float currentLatRad = static_cast<float>(currentLat) *
+                                    1.0e-7f * 0.01745329251994329577f;
+        const float lonScale = cosf(currentLatRad);
+
+        // 1 degree latitude ~= 111319.49 m. Coordinates use degree * 1e7.
+        const float deltaUnits = static_cast<float>(distanceM) *
+                                 (10000000.0f / 111319.49079327357f);
+        const int32_t deltaLat = static_cast<int32_t>(
+            lroundf(deltaUnits * cosf(bearingRad)));
+        const int32_t deltaLon = (fabsf(lonScale) > 0.000001f)
+            ? static_cast<int32_t>(
+                  lroundf(deltaUnits * sinf(bearingRad) / lonScale))
+            : 0;
+
+        homeLat = currentLat - deltaLat;
+        homeLon = currentLon - deltaLon;
+
+        // FVP/FVN has no independent Home altitude. Use the current forced
+        // GPS altitude so the simulated Home distance stays horizontal.
+        homeAltCm = fields[ALTITUDE].value;
+    }
+
+    CRSFBufferLength = 0;
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(10 + 2); // 10-byte payload + frame type + CRC
+    fillBufferU8(OXS_CRSF_FRAMETYPE_GPS_HOME);
+    fillBufferI32(homeLat);
+    fillBufferI32(homeLon);
+
+    const int32_t homeAltM = crsfRoundDiv(homeAltCm, 100);
+    fillBufferU16(static_cast<uint16_t>(
+        crsfClamp(1000 + homeAltM, 0, 65535)));
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2], 10 + 1));
+
+    crsfFrameNextMillis[idx] = millisRp() + OXS_GPS_HOME_FRAME_INTERVAL;
+    crsfDebugFrame("GpsHome");
+    crsfStartDma();
+}
+
+// CRSF 0x03: GPS date/time in UTC from the existing oXs GPS fields.
+// oXs encodes GPS_DATE as [YY, MM, DD, FF] and GPS_TIME as
+// [HH, MM, SS, 00].  Bytes are numeric binary, NOT BCD.
+// CRSF expects [year_u16_BE, MM, DD, HH, MM, SS, milliseconds_u16_BE]
+// (9 payload bytes, 0x03 type + checksum). The receiver/ELRS then forwards
+// this to OpenAVRc, which maps it to FrSky S.Port GPS_DATE/TIME (0x0850).
+//
+// Never derive the clock from millisRp(): a real GPS supplies UTC directly.
+// Do not modify telemetry flags when the packed date/time are invalid.
+static void fillFrameGpsTime(uint8_t idx) {
+    const uint32_t date = static_cast<uint32_t>(fields[GPS_DATE].value);
+    const uint32_t time = static_cast<uint32_t>(fields[GPS_TIME].value);
+
+    const uint8_t yy = static_cast<uint8_t>(date >> 24);
+    const uint8_t month = static_cast<uint8_t>(date >> 16);
+    const uint8_t day = static_cast<uint8_t>(date >> 8);
+    const uint8_t hour = static_cast<uint8_t>(time >> 24);
+    const uint8_t minute = static_cast<uint8_t>(time >> 16);
+    const uint8_t second = static_cast<uint8_t>(time >> 8);
+
+    // In forced simulation the known values are 24/04/16 and 22:13:31.
+    // Reject empty/corrupt values so they cannot reset the radio RTC.
+    if ((date & 0xFFu) != 0xFFu || (time & 0xFFu) != 0u ||
+        yy > 99 || month < 1 || month > 12 || day < 1 || day > 31 ||
+        hour > 23 || minute > 59 || second > 59) {
+        crsfFrameNextMillis[idx] = millisRp() + OXS_GPS_TIME_FRAME_INTERVAL;
+        fields[GPS_TIME].available = false;
+        return;
+    }
+
+    CRSFBufferLength = 0;
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(9 + 2); // 9-byte payload + frame type + CRC
+    fillBufferU8(OXS_CRSF_FRAMETYPE_GPS_TIME);
+    fillBufferU16(static_cast<uint16_t>(2000u + yy));
+    fillBufferU8(month);
+    fillBufferU8(day);
+    fillBufferU8(hour);
+    fillBufferU8(minute);
+    fillBufferU8(second);
+    fillBufferU16(0); // milliseconds unavailable in existing oXs fields
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2], 9 + 1));
+
+    // Consume this one GPS time sample. On real GPS the next update will
+    // set available=true again; don't keep resetting RTC to a stale time.
+    fields[GPS_TIME].available = false;
+    crsfFrameNextMillis[idx] = millisRp() + OXS_GPS_TIME_FRAME_INTERVAL;
+    crsfDebugFrame("GpsTime");
+    crsfStartDma();
+}
+
+// CRSF 0x0A: uint16 airspeed in 0.1 km/h.
+static void fillFrameAirspeed(uint8_t idx) {
+    CRSFBufferLength = 0;
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(2 + 2); // payload 2 + type + crc
+    fillBufferU8(OXS_CRSF_FRAMETYPE_AIRSPEED);
+
+    const uint16_t speed01kmh = static_cast<uint16_t>(
+        crsfClamp(crsfRoundDiv(static_cast<int64_t>(fields[AIRSPEED].value) * 36, 100),
+                  0, 65535));
+    fillBufferU16(speed01kmh);
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2], 3));
+    crsfFrameNextMillis[idx] = millisRp() + OXS_AIRSPEED_FRAME_INTERVAL;
+    crsfDebugFrame("Airspeed");
+    crsfStartDma();
+}
+
+// CRSF 0x0C: source_id + one signed 24-bit RPM value.
+static void fillFrameRpm(uint8_t idx) {
+    CRSFBufferLength = 0;
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(4 + 2); // payload 4 + type + crc
+    fillBufferU8(OXS_CRSF_FRAMETYPE_RPM);
+
+    fillBufferU8(0); // source_id 0 = first RPM source
+    fillBufferI24(crsfClamp(fields[RPM].value, -8388608, 8388607));
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2], 5));
+    crsfFrameNextMillis[idx] = millisRp() + OXS_RPM_FRAME_INTERVAL;
+    crsfDebugFrame("RPM");
+    crsfStartDma();
+}
+
+// CRSF 0x0D: source_id + one or two int16 temperatures in 0.1 C.
+static void fillFrameTemp(uint8_t idx) {
+    CRSFBufferLength = 0;
+
+    uint8_t sourceId = 0;
+    bool sendTemp1 = fields[TEMP1].available;
+    bool sendTemp2 = fields[TEMP2].available;
+
+    // If TEMP1 is absent but TEMP2 exists, keep it as a separate source.
+    if (!sendTemp1 && sendTemp2) sourceId = 1;
+
+    const uint8_t count = (sendTemp1 && sendTemp2) ? 2 : 1;
+    const uint8_t payloadSize = 1 + count * 2;
+
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(payloadSize + 2);
+    fillBufferU8(OXS_CRSF_FRAMETYPE_TEMP);
+    fillBufferU8(sourceId);
+
+    if (sendTemp1) {
+        fillBufferI16(static_cast<int16_t>(
+            crsfClamp(static_cast<int64_t>(fields[TEMP1].value) * 10,
+                      -32768, 32767)));
+    }
+
+    if (sendTemp2) {
+        fillBufferI16(static_cast<int16_t>(
+            crsfClamp(static_cast<int64_t>(fields[TEMP2].value) * 10,
+                      -32768, 32767)));
+    }
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2], payloadSize + 1));
+    crsfFrameNextMillis[idx] = millisRp() + OXS_TEMP_FRAME_INTERVAL;
+    crsfDebugFrame("Temp");
+    crsfStartDma();
+}
+
+// CRSF 0x0E: source_id 129 => general voltage array.
+// ADS_1_1 ... ADS_1_4 are already in millivolts, exactly the CRSF unit.
+static void fillFrameAds1(uint8_t idx) {
+    CRSFBufferLength = 0;
+
+    // Send through the highest available ADS1 channel so EdgeTX subIds stay
+    // stable: 0=ADS_1_1 ... 3=ADS_1_4.
+    int8_t last = -1;
+    if (fields[ADS_1_1].available) last = 0;
+    if (fields[ADS_1_2].available) last = 1;
+    if (fields[ADS_1_3].available) last = 2;
+    if (fields[ADS_1_4].available) last = 3;
+    if (last < 0) return;
+
+    const uint8_t payloadSize = 1 + static_cast<uint8_t>(last + 1) * 2;
+
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(payloadSize + 2);
+    fillBufferU8(OXS_CRSF_FRAMETYPE_VOLTAGES);
+    fillBufferU8(OXS_ADS1_VOLTAGE_SOURCE_ID);
+
+    const fieldIdx adsFields[4] = {ADS_1_1, ADS_1_2, ADS_1_3, ADS_1_4};
+    for (int8_t i = 0; i <= last; i++) {
+        // A missing channel inside the group is sent as 0 mV to preserve
+        // stable EdgeTX subIds; normally configured ADS1 channels are all live.
+        const int32_t mv = fields[adsFields[i]].available ? fields[adsFields[i]].value : 0;
+        fillBufferU16(static_cast<uint16_t>(crsfClamp(mv, 0, 65535)));
+    }
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2], payloadSize + 1));
+    crsfFrameNextMillis[idx] = millisRp() + OXS_ADS1_FRAME_INTERVAL;
+    crsfDebugFrame("ADS1");
+    crsfStartDma();
+}
+
+
+
+
+
+// CRSF 0x0E Cells: source_id 0 + 8 cell voltages in millivolts.
+// Used only while FVP/FVN is active.
+// Values come from the generic Tools simulation.
+static void fillFrameCells(uint8_t idx) {
+    const uint16_t *cells = getForcedCellValues(forcedFields);
+    if (cells == nullptr) return;
+
+    constexpr uint8_t cellCount = 8;
+    constexpr uint8_t payloadSize = 1 + cellCount * 2;
+
+    CRSFBufferLength = 0;
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(payloadSize + 2);
+    fillBufferU8(OXS_CRSF_FRAMETYPE_VOLTAGES);
+    fillBufferU8(0); // source_id 0 = first battery/cell group
+
+    for (uint8_t i = 0; i < cellCount; ++i)
+        fillBufferU16(cells[i]);
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2], payloadSize + 1));
+
+    crsfFrameNextMillis[idx] = millisRp() + OXS_CELLS_FRAME_INTERVAL;
+    crsfDebugFrame(crsfForcedPositive() ? "Cells8 FVP" : "Cells8 FVN");
+    crsfStartDma();
+}
+
+// CRSF 0x13 Accel/Gyro.
+// Official CRSF scaling:
+//   acc raw = G * INT16_MAX / 16
+// oXs ACC_X/Y/Z are stored in 0.001 g, so:
+//   raw = milli_g * 32767 / 16000
+//
+// oXs does not currently expose matching raw gyro/temperature fields through
+// this CRSF output path, therefore those values are sent as zero. The three
+// accelerometer axes remain fully standard-compliant.
+static void fillFrameAccGyro(uint8_t idx) {
+    constexpr uint8_t payloadSize = 18;
+
+    const int16_t accX = static_cast<int16_t>(crsfClamp(
+        crsfRoundDiv(static_cast<int64_t>(fields[ACC_X].value) * 32767, 16000),
+        -32768, 32767));
+    const int16_t accY = static_cast<int16_t>(crsfClamp(
+        crsfRoundDiv(static_cast<int64_t>(fields[ACC_Y].value) * 32767, 16000),
+        -32768, 32767));
+    const int16_t accZ = static_cast<int16_t>(crsfClamp(
+        crsfRoundDiv(static_cast<int64_t>(fields[ACC_Z].value) * 32767, 16000),
+        -32768, 32767));
+
+    CRSFBufferLength = 0;
+    fillBufferU8(CRSF_ADDRESS_CRSF_RECEIVER);
+    fillBufferU8(payloadSize + 2);
+    fillBufferU8(OXS_CRSF_FRAMETYPE_ACCGYRO);
+
+    // Timestamp in microseconds.
+    fillBufferI32(static_cast<int32_t>(millisRp() * 1000UL));
+
+    // Gyro X/Y/Z: not supplied by this oXs telemetry field set.
+    fillBufferI16(0);
+    fillBufferI16(0);
+    fillBufferI16(0);
+
+    // Real accelerometer axes.
+    fillBufferI16(accX);
+    fillBufferI16(accY);
+    fillBufferI16(accZ);
+
+    // Gyro temperature: unavailable here.
+    fillBufferI16(0);
+
+    fillBufferU8(crsf_crc_out.calc(&CRSFBuffer[2], payloadSize + 1));
+
+    fields[ACC_X].available = false;
+    fields[ACC_Y].available = false;
+    fields[ACC_Z].available = false;
+
+    crsfFrameNextMillis[idx] = millisRp() + OXS_ACCGYRO_FRAME_INTERVAL;
+    crsfDebugFrame("AccGyro");
+    crsfStartDma();
+}
+
+void fillOneFrame(uint8_t idx) {
+    switch (idx) {
+        case CRSF_FRAMEIDX_BATTERY_SENSOR:
+            fillFrameBattery(idx);
+            break;
+
+        case CRSF_FRAMEIDX_VARIO:
+            fillFrameVario(idx);
+            break;
+
+        case CRSF_FRAMEIDX_ATTITUDE:
+            fillFrameAttitude(idx);
+            break;
+
+        case CRSF_FRAMEIDX_GPS:
+            fillFrameGps(idx);
+            break;
+
+        case CRSF_FRAMEIDX_BARO_ALTITUDE:
+            fillFrameBaroAltitude(idx);
+            break;
+
+        case OXS_CRSF_FRAMEIDX_AIRSPEED:
+            fillFrameAirspeed(idx);
+            break;
+
+        case OXS_CRSF_FRAMEIDX_RPM:
+            fillFrameRpm(idx);
+            break;
+
+        case OXS_CRSF_FRAMEIDX_TEMP:
+            fillFrameTemp(idx);
+            break;
+
+        case OXS_CRSF_FRAMEIDX_ADS1:
+            fillFrameAds1(idx);
+            break;
+
+        case OXS_CRSF_FRAMEIDX_GPS_TIME:
+            fillFrameGpsTime(idx);
+            break;
+
+        case OXS_CRSF_FRAMEIDX_CELLS:
+            fillFrameCells(idx);
+            break;
+
+        case OXS_CRSF_FRAMEIDX_ACCGYRO:
+            fillFrameAccGyro(idx);
+            break;
+
+        case OXS_CRSF_FRAMEIDX_GPS_HOME:
+            fillFrameGpsHome(idx);
+            break;
+    }
+}
+
+
+// a CRSF RC channel frame contains
+// 1 byte with CRSF_ADDRESS_FLIGHT_CONTROLLER = 0xC8,
+// 1 byte with the payload length + 2 (type and crc) RC_PAYLOAD_LENGTH_PLUS2 = 24
+// 1 byte with the type : CRSF_FRAMETYPE_RC_CHANNELS_PACKED = 0x16
+// 22 bytes = 16 channels (11 bits)
+// 1 byte with the crc
+
+#define CRSF_ADDRESS_FLIGHT_CONTROLLER    0xC8
+#define RC_PAYLOAD_LENGTH                 22
+#define CRSF_FRAMETYPE_RC_CHANNELS_PACKED 0x16
+
+void printAttitudeFrame() {
+    printf("Attitude frame\n");
+    printf("  device= 0x%X\n", attitudeFrame.device_addr);
+    printf("  size  = 0x%X\n", attitudeFrame.frame_size);
+    printf("  type  = 0x%X\n", attitudeFrame.type);
+    printf("  pitch = %" PRIi16 "\n", attitudeFrame.pitch);
+    printf("  roll  = %" PRIi16 "\n", attitudeFrame.roll);
+    printf("  yaw   = %" PRIi16 "\n", attitudeFrame.yaw);
+    printf("  crc   = 0x%X\n", attitudeFrame.crc);
+}
+
+void printGpsFrame() {
+    printf("GPS frame\n");
+    printf("  device= 0x%X\n", gpsFrame.device_addr);
+    printf("  size  = 0x%X\n", gpsFrame.frame_size);
+    printf("  type  = 0x%X\n", gpsFrame.type);
+    printf("  lat   = %" PRIi32 "\n", gpsFrame.latitude);
+    printf("  long  = %" PRIi32 "\n", gpsFrame.longitude);
+    printf("  speed = %" PRIu16 "\n", static_cast<uint16_t>(gpsFrame.groundspeed));
+    printf("  head  = %" PRIu16 "\n", static_cast<uint16_t>(gpsFrame.heading));
+    printf("  alt   = %" PRIu16 "\n", static_cast<uint16_t>(gpsFrame.altitude));
+    printf("  numSat= 0x%X\n", gpsFrame.numSat);
+    printf("  crc   = 0x%X\n", gpsFrame.crc);
+}
+
+void printBatteryFrame() {
+    printf("Battery frame\n");
+    printf("  device= 0x%X\n", voltageFrame.device_addr);
+    printf("  mvolt = %" PRIu16 "\n", voltageFrame.mVolt);
+    printf("  curr  = %" PRIu16 "\n", voltageFrame.current);
+    printf("  capac = %" PRIu32 "\n", static_cast<uint32_t>(voltageFrame.capacity));
+    printf("  remain= 0x%X\n", static_cast<uint8_t>(voltageFrame.remain));
+    printf("  crc   = 0x%X\n", voltageFrame.crc);
+}

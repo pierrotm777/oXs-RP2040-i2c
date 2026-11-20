@@ -317,7 +317,7 @@ static const uint16_t forcedCellValuesNeg[FORCED_CELL_COUNT] = {
     3200, 3180, 3160, 3140, 3120, 3100, 3080, 3060
 };
 
-// FVSWEEP: stepped test values with independent timers.
+// FVPOWER: stepped test values with independent timers.
 // Each telemetry family advances independently so changes are easy to see.
 //
 // VFAS : 10 values, one step every 2500 ms
@@ -398,6 +398,97 @@ static void updateForcedSweepValues() {
         if (cellMv > 4200) cellMv = 4200;
         forcedCellValuesSweep[i] = (uint16_t)cellMv;
     }
+
+}
+
+// FVGPS: simulate a coherent GPS trip around the FVP Paris position.
+// Cycle = 60 s:
+//    0..5 s   : stay at Home so the transmitter can acquire its Home position
+//    5..30 s  : move from Home to 500 m at bearing 179 deg
+//   30..55 s  : return from 500 m to Home
+//   55..60 s  : stay at Home
+//
+// Speed follows a triangular profile on each leg (0 -> 40 -> 0 m/s).
+// GPS altitude rises by 50 m at the farthest point and returns to the
+// starting altitude. GPS_HOME_DISTANCE remains the horizontal distance.
+static void updateForcedGpsValues(bool reset) {
+    static uint32_t startMs = 0;
+
+    const uint32_t now = millisRp();
+    if (reset || startMs == 0) startMs = now;
+
+    const uint32_t cycleMs = 60000UL;
+    const uint32_t holdMs = 5000UL;
+    const uint32_t legMs = 25000UL;
+    const uint32_t halfLegMs = legMs / 2UL;
+    const uint32_t t = (uint32_t)(now - startMs) % cycleMs;
+
+    uint32_t distanceM = 0;
+    uint32_t speedCmS = 0;
+    int32_t heading100 = 0;
+
+    if (t >= holdMs && t < (holdMs + legMs)) {
+        // Outbound leg: Home -> 500 m.
+        const uint32_t e = t - holdMs;
+        heading100 = 17900;
+
+        if (e <= halfLegMs) {
+            speedCmS = (uint32_t)(((uint64_t)e * 4000ULL) / halfLegMs);
+            distanceM = (uint32_t)((250ULL * (uint64_t)e * (uint64_t)e) /
+                                   ((uint64_t)halfLegMs * halfLegMs));
+        } else {
+            const uint32_t r = legMs - e;
+            speedCmS = (uint32_t)(((uint64_t)r * 4000ULL) / halfLegMs);
+            distanceM = 500U - (uint32_t)((250ULL * (uint64_t)r * (uint64_t)r) /
+                                          ((uint64_t)halfLegMs * halfLegMs));
+        }
+    } else if (t >= (holdMs + legMs) && t < (holdMs + 2UL * legMs)) {
+        // Return leg: 500 m -> Home.
+        const uint32_t e = t - (holdMs + legMs);
+        heading100 = 35900;
+
+        if (e <= halfLegMs) {
+            speedCmS = (uint32_t)(((uint64_t)e * 4000ULL) / halfLegMs);
+            distanceM = 500U - (uint32_t)((250ULL * (uint64_t)e * (uint64_t)e) /
+                                          ((uint64_t)halfLegMs * halfLegMs));
+        } else {
+            const uint32_t r = legMs - e;
+            speedCmS = (uint32_t)(((uint64_t)r * 4000ULL) / halfLegMs);
+            distanceM = (uint32_t)((250ULL * (uint64_t)r * (uint64_t)r) /
+                                   ((uint64_t)halfLegMs * halfLegMs));
+        }
+    }
+
+    // Home = Paris FVP position. Endpoint is 500 m away at bearing 179 deg.
+    const int32_t homeLat = 488566000L;  // 48.8566000 deg
+    const int32_t homeLon =  23522000L;  //  2.3522000 deg
+    const int32_t endLat  = 488521041L;  // 48.8521041 deg
+    const int32_t endLon  =  23523193L;  //  2.3523193 deg
+
+    fields[LATITUDE].value = homeLat + (int32_t)(
+        ((int64_t)(endLat - homeLat) * (int64_t)distanceM) / 500LL);
+    fields[LONGITUDE].value = homeLon + (int32_t)(
+        ((int64_t)(endLon - homeLon) * (int64_t)distanceM) / 500LL);
+
+    fields[GPS_HOME_DISTANCE].value = (int32_t)distanceM;
+    fields[GPS_HOME_BEARING].value = distanceM ? 179 : 0;
+    fields[ALTITUDE].value = 10000L + (int32_t)distanceM * 10L; // 100 m -> 150 m
+    fields[GROUNDSPEED].value = (int32_t)speedCmS;
+    fields[HEADING].value = heading100;
+
+    // oXs convention: +100 means 3D fix; therefore 120 = fix + 20 sats.
+    fields[NUMSAT].value = 120;
+    fields[GPS_PDOP].value = 129; // 1.29
+
+    const uint8_t gpsFields[] = {
+        LATITUDE, LONGITUDE, GROUNDSPEED, HEADING, ALTITUDE,
+        NUMSAT, GPS_PDOP, GPS_HOME_BEARING, GPS_HOME_DISTANCE
+    };
+    for (uint8_t i = 0; i < sizeof(gpsFields); ++i) {
+        fields[gpsFields[i]].available = true;
+        fields[gpsFields[i]].onceAvailable = true;
+    }
+
 }
 
 const uint16_t * getForcedCellValues(uint8_t forcedFields) {
@@ -405,13 +496,15 @@ const uint16_t * getForcedCellValues(uint8_t forcedFields) {
     if (forcedFields == 2 || forcedFields == 'N') return forcedCellValuesNeg; // FVN
     if (forcedFields == 3 || forcedFields == 'S') {
         updateForcedSweepValues();
-        return forcedCellValuesSweep; // FVSWEEP
+        return forcedCellValuesSweep; // FVPOWER
     }
     return nullptr;
 }
 
 // fill all fields with dummy values (useful to test a protocol)
 void fillFields( uint8_t forcedFields){
+    static uint8_t lastForcedFields = 0;
+
     // FVP: force all fields, just as FVN does. Reapplied from main.cpp
     // while simulation is active; in particular V3/V4 cannot overwrite TEMP1/TEMP2.
     if (forcedFields == 1)  {   // force positive values
@@ -428,9 +521,13 @@ void fillFields( uint8_t forcedFields){
             fields[i].onceAvailable = true; 
         }
     }
-    if (forcedFields == 3) {    // FVSWEEP: VFAS + Curr + cells only
+    if (forcedFields == 3) {    // FVPOWER: VFAS + Curr + cells only
         updateForcedSweepValues();
     }
+    if (forcedFields == 4) {    // FVGPS: moving GPS simulation only
+        updateForcedGpsValues(lastForcedFields != 4);
+    }
+    lastForcedFields = forcedFields;
 }
 
 uint16_t swapBinary(uint16_t value) {

@@ -113,6 +113,8 @@ extern float accScale1G ; // use here when printing the result of acc calibratio
 extern queue_t qSendCmdToCore1;
 
 extern uint8_t forcedFields;
+const uint16_t * getForcedCellValues(uint8_t forcedFields);
+void printForcedCellValues();
 
 extern float dteCompensationFactor;
 
@@ -262,7 +264,8 @@ void printHelp(){
     printf("Testing                     FV                  Field Values (display all telemetry internal values)\n")  ;
     printf("                            FVP                 Field Values Positieve (force the tlm values to positieve dummy values\n")  ;
     printf("                            FVN                      idem with negatieve values\n")  ;
-    printf("                            FVSWEEP             Slowly sweep VFAS, Curr and simulated cell voltages\n")  ;
+    printf("                            FVPOWER             Slowly sweep VFAS, Curr and simulated cell voltages\n")  ;
+    printf("                            FVGPS               Gps simulation\n")  ;                 
     printf("                            PWM                 Display the current PWM values (in micro sec)\n");
     printf("\n");
     printf("Display HELP                DEBUG=HELP          display Locateur or Esc commands to get some debug messages (up to next reset)\n");
@@ -772,6 +775,7 @@ int8_t handleOneCmd( char * bufferPos){ // handle one command with buffer starti
     // print current values of all telemetry fields
     if ( strcmp("FV", pkey) == 0 ) { 
             printFieldValues();
+            if (forcedFields != 0) printForcedCellValues();
             return 0;
     }
     // force dummy positive value
@@ -781,6 +785,7 @@ int8_t handleOneCmd( char * bufferPos){ // handle one command with buffer starti
             if (config.protocol == 'E') setupExbusList(true); // rebuild the list of fields being sent in jeti exbus
             if (config.protocol == 'J') initListOfJetiFields(true); // rebuild the list of fields being sent in jeti ex
             printFieldValues();
+            printForcedCellValues();
             printf("Internal telemetry fields are now filled with POSITIVE dummy values\n");
             printf("To get real values again, you have to power down\n");
             
@@ -794,20 +799,37 @@ int8_t handleOneCmd( char * bufferPos){ // handle one command with buffer starti
             if (config.protocol == 'J') initListOfJetiFields(true); // rebuild the list of fields being sent in jeti ex
             
             printFieldValues();
+            printForcedCellValues();
             printf("Internal telemetry fields are now filled with NEGATIVE dummy values\n");
             printf("To get real values again, you have to power down\n");
             return 0;
     }
     // slowly sweep VFAS, Curr and simulated cell voltages
-    if ( strcmp("FVSWEEP", pkey) == 0 ) {
+    if ( strcmp("FVPOWER", pkey) == 0 ) {
             forcedFields = 3;
             fillFields(forcedFields);
             if (config.protocol == 'E') setupExbusList(true); // rebuild the list of fields being sent in jeti exbus
             if (config.protocol == 'J') initListOfJetiFields(true); // rebuild the list of fields being sent in jeti ex
 
             printFieldValues();
-            printf("FVSWEEP started: VFAS, Curr and simulated cells vary slowly\n");
+            printForcedCellValues();
+            printf("FVPOWER started: VFAS, Curr and simulated cells vary slowly\n");
             printf("Cycle = 60 s (30 s up + 30 s down)\n");
+            printf("To get real values again, you have to power down\n");
+            return 0;
+    }
+
+    // simulate a moving GPS
+    if ( strcmp("FVGPS", pkey) == 0 ) {
+            forcedFields = 4;
+            fillFields(forcedFields);
+            if (config.protocol == 'E') setupExbusList(true); // rebuild the list of fields being sent in jeti exbus
+            if (config.protocol == 'J') initListOfJetiFields(true); // rebuild the list of fields being sent in jeti ex
+
+            printFieldValues();
+            printf("FVGPS started: Glat, Glon, Gdist, Galt, Gspeed and Heading vary\n");
+            printf("Cycle = 60 s: 5 s Home, 25 s outbound, 25 s return, 5 s Home\n");
+            printf("Max horizontal distance = 500 m, max GPS altitude = 150 m\n");
             printf("To get real values again, you have to power down\n");
             return 0;
     }
@@ -2374,6 +2396,27 @@ void printConfigOffsets(){
     printf("                              %f %f %f\n", config.accScaleXZ , config.accScaleYZ ,config.accScaleZZ );
     printf("     Gyro offsets         X, Y, Z = %i , %i , %i\n", config.gyroOffsetX , config.gyroOffsetY , config.gyroOffsetZ); 
     //    printf("Gyro. X = %d, Y = %d, Z = %d\n", (int) config.gyroOffsetX , (int) config.gyroOffsetY, (int) config.gyroOffsetZ);
+}
+
+void printForcedCellValues(){
+    const uint16_t * cellsMv = getForcedCellValues(forcedFields);
+    if (cellsMv == nullptr) {
+        printf("Simulated cells: inactive\n");
+        return;
+    }
+
+    uint32_t totalMv = 0;
+    printf("Simulated cells:");
+    for (uint8_t i = 0; i < 8; ++i) {
+        totalMv += cellsMv[i];
+        printf(" C%u=%u.%03uV",
+               (unsigned)(i + 1U),
+               (unsigned)(cellsMv[i] / 1000U),
+               (unsigned)(cellsMv[i] % 1000U));
+    }
+    printf("  Total8=%u.%03uV\n",
+           (unsigned)(totalMv / 1000U),
+           (unsigned)(totalMv % 1000U));
 }
 
 void printFieldValues(){

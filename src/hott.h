@@ -175,13 +175,12 @@ typedef struct {
   uint8_t angleXdirection;         /* Byte 30: angle x-direction (1 byte) */
   uint8_t angleYdirection;         /* Byte 31: angle y-direction (1 byte) */
   uint8_t angleZdirection;         /* Byte 32: angle z-direction (1 byte) */
-  uint8_t gyroXLow;                /* Byte 33: gyro x low byte (2 bytes) */
-  uint8_t gyroXHigh;               /* Byte 34: gyro x high byte */
-  uint8_t gyroYLow;                /* Byte 35: gyro y low byte (2 bytes) */
-  uint8_t gyroYHigh;               /* Byte 36: gyro y high byte */
-  uint8_t gyroZLow;                /* Byte 37: gyro z low byte (2 bytes) */
-  uint8_t gyroZHigh;               /* Byte 38: gyro z high byte */
-  uint8_t vibration;               /* Byte 39: vibration (1 bytes) */
+  uint8_t gps_time_h;              /* Byte 33: UTC time hours */
+  uint8_t gps_time_m;              /* Byte 34: UTC time minutes */
+  uint8_t gps_time_s;              /* Byte 35: UTC time seconds */
+  uint8_t gps_time_sss;            /* Byte 36: UTC time milliseconds */
+  uint16_t msl_altitude;           /* Byte 37-38: mean sea level altitude in m */
+  uint8_t vibration;               /* Byte 39: vibration level */
   uint8_t Ascii4;                  /* Byte 40: 00 ASCII Free Character [4] */
   uint8_t Ascii5;                  /* Byte 41: 00 ASCII Free Character [5] */
   uint8_t GPS_fix;                 /* Byte 42: 00 ASCII Free Character [6], we use it for GPS FIX */
